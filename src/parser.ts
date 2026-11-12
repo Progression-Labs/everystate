@@ -730,6 +730,7 @@ class Parser {
           if (this.eatKw('OTHER')) {
             this.expectOp('->');
             other = this.parseExpr();
+            break; // OTHER is always the last arm; a following [] belongs to an enclosing CASE
           } else {
             const c = this.parseExpr();
             this.expectOp('->');

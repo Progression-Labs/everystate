@@ -88,7 +88,19 @@ export class LazyFcn {
     }
     return c;
   }
+  // [f EXCEPT ![k] = v] on a function that is not enumerated: later entries win
+  over: [Value, Value][] | null = null;
+  withOverride(key: Value, val: Value): LazyFcn {
+    const g = new LazyFcn(this.node, null, this.ev);
+    g.ctx = this.ctx;
+    g.memo = this.memo;
+    g.over = this.over ? [...this.over, [key, val]] : [[key, val]];
+    return g;
+  }
   apply(arg: Value): Value {
+    if (this.over !== null) {
+      for (let i = this.over.length - 1; i >= 0; i--) if (valEq(this.over[i][0], arg)) return this.over[i][1];
+    }
     const ev = this.ev;
     const key = typeof arg === 'number' || typeof arg === 'string' ? arg : '\u0001' + fmt(arg);
     const hit = this.memo.get(key);
@@ -113,7 +125,9 @@ export class LazyFcn {
     if (this.forced !== undefined) return this.forced;
     const ev = this.ev;
     const s0 = ev.stTouch, p0 = ev.prTouch;
-    const dom = this.domain().elems();
+    const ds = this.domain();
+    if (!ds.enumerable()) return this; // stays lazy: only application and EXCEPT are possible
+    const dom = ds.elems();
     const vals = dom.map(d => this.apply(d));
     const f = makeFcn(dom, vals);
     if (ev.stTouch === s0 && ev.prTouch === p0) this.forced = f;
@@ -539,9 +553,17 @@ export class Evaluator {
       case O_bigunion: {
         const s = this.evalElems(n.a[0], ctx);
         const all: Value[] = [];
+        let lazy = false;
         for (const x of s) {
           if (!(x instanceof SetBase)) return this.fail(`Attempted to apply UNION to a set containing the non-set value ${fmt(x)}`, n);
+          if (!(x instanceof SetV)) { lazy = true; break; }
           for (const y of x.elems()) all.push(y);
+        }
+        if (lazy) {
+          // like TLC's UnionValue: membership is tested against the member sets, enumeration is on demand
+          const sets = s as SetBase[];
+          return new DerivedSetV("UNION ...", v => { for (const x of sets) if (x.contains(v)) return true; return false; },
+            sets.every(x => x.enumerable()) ? () => { const out: Value[] = []; for (const x of sets) for (const y of x.elems()) out.push(y); return out; } : null);
         }
         return mkSet(all);
       }
@@ -753,8 +775,15 @@ export class Evaluator {
     }
     const dom: Value[] = [], vals: Value[] = [];
     const sets: Value[][] = [];
+    const bsets: SetBase[] = [];
     for (const b of bounds) {
-      const es = this.evalElems(b.set!, ctx);
+      const bs = this.evalSet(b.set!, ctx);
+      if (!bs.enumerable()) return new LazyFcn(n, ctx, this);
+      bsets.push(bs);
+    }
+    for (let bi = 0; bi < bounds.length; bi++) {
+      const b = bounds[bi];
+      const es = bsets[bi].elems();
       const cnt = b.tuple ? 1 : b.names!.length;
       for (let j = 0; j < cnt; j++) sets.push(es);
     }
@@ -820,7 +849,12 @@ export class Evaluator {
       vals[k] = upd(vals[k]);
       return new FcnV(f.dom, vals);
     }
-    if (f instanceof LazyFcn) return this.exceptUpdate(f.force(), path, i, valNode, ctx, n);
+    if (f instanceof LazyFcn) {
+      const d = f.domain();
+      if (d.enumerable()) return this.exceptUpdate(f.force(), path, i, valNode, ctx, n);
+      if (!d.contains(key)) return f;
+      return f.withOverride(key, upd(f.apply(key)));
+    }
     return this.fail(`Attempted to apply EXCEPT to the non-function value\n${fmt(f)}`, n);
   }
 

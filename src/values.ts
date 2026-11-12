@@ -287,6 +287,7 @@ function eqFail(a: Value, b: Value): never {
 }
 
 // Total order used for set normalization. Mirrors TLC's compareTo.
+const INF_ORDER = ['Nat', 'Int', 'Real', 'STRING'];
 export function compare(a: Value, b: Value): number {
   if (typeof a === 'number') {
     if (typeof b === 'number') return a < b ? -1 : a > b ? 1 : 0;
@@ -307,6 +308,11 @@ export function compare(a: Value, b: Value): number {
   if (b instanceof ModelValue) return modelCmp(b, a) * -1;
   if (a instanceof SetBase) {
     if (!(b instanceof SetBase)) return cmpFail(a, b);
+    if (a instanceof InfSetV || b instanceof InfSetV) {
+      if (a instanceof InfSetV && b instanceof InfSetV) return INF_ORDER.indexOf(a.kind) - INF_ORDER.indexOf(b.kind);
+      const [u, o] = a instanceof InfSetV ? [a, b] : [b, a];
+      return err(`Attempted to compare overridden value ${fmt(u)} with non-overridden value:\n${fmt(o)}`);
+    }
     const x = a.elems(), y = b.elems();
     if (x.length !== y.length) return x.length - y.length;
     for (let i = 0; i < x.length; i++) {
