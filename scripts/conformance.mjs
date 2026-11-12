@@ -9,6 +9,7 @@ const root = args[0];
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
 const maxRuntime = Number(opt('--max-runtime', 30)), timeout = Number(opt('--timeout', 120)) * 1000;
 const filter = opt('--filter', ''), jobs = Number(opt('--jobs', 4));
+const only = opt('--only', ''); // comma-separated result kinds to include, e.g. success,safety failure
 const cli = path.resolve(import.meta.dirname, '../src/cli.ts');
 const secs = r => r === 'unknown' ? 1e9 : r.split(':').reduce((a, x) => a * 60 + Number(x), 0);
 const cases = [];
@@ -18,6 +19,7 @@ for (const d of fs.readdirSync(path.join(root, 'specifications'))) {
   for (const mod of JSON.parse(fs.readFileSync(mf, 'utf8')).modules) for (const m of mod.models) {
     if (m.mode !== 'exhaustive search' || secs(m.runtime) > maxRuntime || m.result === 'unknown') continue;
     if (filter && !m.path.includes(filter)) continue;
+    if (only && !only.split(',').includes(m.result)) continue;
     cases.push({ spec: path.join(root, mod.path), cfg: path.join(root, m.path), exp: m });
   }
 }
@@ -30,7 +32,9 @@ async function worker() {
     const c = cases[next++];
     const t0 = Date.now();
     const out = await new Promise(res => {
-      const p = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', '--stack-size=30000', '--max-old-space-size=3000', cli, '-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const alt = process.env.VERIFY_CMD; // alternative implementation with the same -json interface (e.g. the Rust port)
+      const p = alt ? spawn(alt, ['-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', cli, '-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] });
       let o = '', e = '';
       p.stdout.on('data', d => { o += d; }); p.stderr.on('data', d => { e += d; });
       const timer = setTimeout(() => { p.kill('SIGKILL'); }, timeout);
