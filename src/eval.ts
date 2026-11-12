@@ -156,6 +156,7 @@ export class Evaluator {
   callDepth = 0;
   nAssigned = 0; // number of target variables assigned during enumeration
   inEnabled = 0;
+  extraGenerated = 0; // intermediate states of action compositions (TLC counts them as generated)
   scratch = new Map<Decl, number>(); // ENABLED: primed variables of instantiated modules are existentially bound
 
   fail(msg: string, n?: Node): never {
@@ -674,6 +675,15 @@ export class Evaluator {
       case O_lambda: return new Closure(n.params, n.body, ctx);
       case O_at: return this.lookup(ctx, '@');
     }
+    if (n.k === 'cdot') {
+      try {
+        this.enumerate(n, ctx, () => { throw FOUND; });
+        return false;
+      } catch (e) {
+        if (e === FOUND) return true;
+        throw e;
+      }
+    }
     if (n.k === 'always' || n.k === 'eventually' || n.k === 'leadsto' || n.k === 'wf' || n.k === 'sf' || n.k === 'guarantee' || n.k === 'tquant') {
       return this.fail('TLC attempted to evaluate a temporal formula where a state or action-level expression was expected.', n);
     }
@@ -759,7 +769,7 @@ export class Evaluator {
   applyFcn(f: Value, arg: Value, n?: Node): Value {
     if (f instanceof TupleV) {
       if (typeof arg === 'number' && arg >= 1 && arg <= f.e.length && Number.isInteger(arg)) return f.e[arg - 1];
-      return this.fail(`Attempted to apply the tuple\n${fmt(f)}\nto the integer ${fmt(arg)} which is out of domain.`, n);
+      return this.fail(typeof arg === 'number' ? `Attempted to apply tuple\n${fmt(f)}\nto integer ${arg} which is out of domain.` : `Attempted to apply tuple\n${fmt(f)}\nto non-integer argument ${fmt(arg)}`, n);
     }
     if (f instanceof RecordV) {
       if (typeof arg === 'string') {
@@ -866,8 +876,34 @@ export class Evaluator {
   // next-state mode, unprimed variables in init mode). Calls k for each satisfying (partial) assignment.
   enumerate(e: Node, ctx: Ctx | null, k: () => void): void {
     // Like TLC: once every variable is assigned, the remaining conjuncts are plain predicates.
-    if (this.nAssigned === this.nvars) { if (this.evalBool(e, ctx)) k(); return; }
+    if (this.nAssigned === this.nvars && e.k !== 'cdot') { if (this.evalBool(e, ctx)) k(); return; }
     switch (e.k) {
+      case 'cdot': {
+        // s -(A \cdot B)-> u  iff  there is a t with  s -A-> t  and  t -B-> u
+        if (this.initMode) break;
+        const sc = this.cur, sn = this.nxt, na = this.nAssigned;
+        const mids: Value[][] = [];
+        const mid: Value[] = new Array(this.nvars);
+        this.nxt = mid; this.nAssigned = 0;
+        try {
+          this.enumerate(e.a[0], ctx, () => {
+            for (let i = 0; i < this.nvars; i++) if (mid[i] === undefined) this.fail('The first action of an action composition (\\cdot) does not completely specify the intermediate state.', e);
+            mids.push(mid.slice());
+          });
+        } finally { this.nxt = sn; this.nAssigned = na; }
+        if (this.inEnabled === 0) this.extraGenerated += mids.length;
+        for (const t of mids) {
+          this.cur = t;
+          try {
+            this.enumerate(e.a[1], ctx, () => {
+              const c = this.cur;
+              this.cur = sc;
+              try { k(); } finally { this.cur = c; }
+            });
+          } finally { this.cur = sc; }
+        }
+        return;
+      }
       case 'and': this.enumConj(e.a, 0, ctx, k); return;
       case 'or': for (const d of e.a) this.enumerate(d, ctx, k); return;
       case 'quant':

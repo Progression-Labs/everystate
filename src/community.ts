@@ -65,21 +65,6 @@ function hostWrite(f: () => void, path: string): void {
   try { f(); } catch (e) { fail(`${path} (${(e as Error).message})`); }
 }
 
-// A function value implemented natively (used for zero-arity definitions such as Combinatorics!factorial).
-class NativeFcn extends LazyFcn {
-  fn: (arg: Value) => Value;
-  name: string;
-  constructor(ev: Evaluator, name: string, fn: (arg: Value) => Value) {
-    super({} as any, null, ev);
-    this.fn = fn;
-    this.name = name;
-  }
-  describe(): string { return `<function ${this.name}>`; }
-  apply(arg: Value): Value { return this.fn(arg); }
-  domain(): SetBase { return fail(`Attempted to enumerate the domain of the natively implemented function ${this.name}.`); }
-  force(): Value { return fail(`Attempted to enumerate the natively implemented function ${this.name}.`); }
-}
-
 // ---- folds ----
 function foldFunctionOnSet(ev: Evaluator, op: Value, base: Value, fun: Value, indices: Value): Value {
   if (!isFcn(fun) && !(fun instanceof LazyFcn)) argErr(2, 'FoldFunctionOnSet', 'function', fun);
@@ -798,12 +783,7 @@ export const OVERRIDES: Record<string, Record<string, [Fn, Partial<Builtin>?]>> 
     }],
   },
   Combinatorics: {
-    factorial: [ev => new NativeFcn(ev, 'factorial', n => {
-      if (!isInt(n) || n < 0) argErr(0, 'factorial', 'natural number', n);
-      let r = 1;
-      for (let i = 2; i <= n; i++) { r *= i; if (r > 2147483647) fail(`Overflow when computing ${n}`); }
-      return r;
-    })],
+    // (TLC's `factorial` override is never reached for the function definition factorial[n]; its TLA+ definition is used.)
     choose: [(_, a) => {
       const [n, k] = a;
       if (!isInt(n) || n < 0) argErr(0, 'choose', 'natural number', n);
@@ -1018,8 +998,8 @@ export const OVERRIDES: Record<string, Record<string, [Fn, Partial<Builtin>?]>> 
         const cells = line.split(re); // Java's String.split: a regex, trailing empty strings removed
         while (cells.length > 1 && cells[cells.length - 1] === '') cells.pop();
         for (const c of cells) strId(c);
-        if (cells.length !== names.length) fail(`CSVRead: a line of ${path} has ${cells.length} fields, but ${names.length} columns were given:\n${line}`);
-        return makeFcnFromPairs(names.map((n, i): [Value, Value] => [n, cells[i]]));
+        // surplus fields are ignored; a short line yields a record without the trailing columns
+        return makeFcnFromPairs(names.slice(0, cells.length).map((n, i): [Value, Value] => [n, cells[i]]));
       }));
     }],
     CSVRecords: [(ev, a) => {
