@@ -330,7 +330,11 @@ export function levelOf(n: Node): number {
         else if (r.k === 'def') l = defLevel(r);
         else if (r.k === 'const' && r.subst) l = defLevel(r.subst);
       }
-      for (const a of n.args) up(a);
+      for (let i = 0; i < n.args.length; i++) {
+        const a = n.args[i];
+        // an action argument that the operator only uses under ENABLED contributes state level
+        if (levelOf(a) === 2 && l < 2 && r && r !== LOCAL && r.k === 'def' && paramOnlyEnabled(r, i)) { if (l < 1) l = 1; } else up(a);
+      }
       break;
     }
     case 'prime': case 'unchanged': case 'boxact': case 'angleact': case 'cdot':
@@ -393,7 +397,7 @@ function collectRefs(n: any, out: Set<string>): void {
     }
   }
   for (const key in n) {
-    if (key === 'r' || key === 'loc' || key === 'instDefs') continue;
+    if (key === 'r' || key === 'loc' || key === 'instDefs' || key === 'ld') continue;
     const v = n[key];
     if (v && typeof v === 'object') collectRefs(v, out);
   }
@@ -424,4 +428,31 @@ export function tailFn(n: Node): boolean {
   }
   n.tf = r;
   return r;
+}
+
+// Does definition `d` use its i-th parameter only inside ENABLED?
+const enabledOnly = new Map<Def, boolean[]>();
+function paramOnlyEnabled(d0: Def, i: number): boolean {
+  let d = d0.override ?? d0, skip = 0;
+  while (d.inst) { skip += d.inst.nparams; d = d.inst.orig; d = d.override ?? d; }
+  i -= skip;
+  if (i < 0 || !d.body || i >= d.params.length) return false;
+  let c = enabledOnly.get(d);
+  if (!c) { c = []; enabledOnly.set(d, c); }
+  if (c[i] !== undefined) return c[i];
+  const name = d.params[i].name;
+  let used = false;
+  const walk = (x: any): boolean => { // false if used outside ENABLED
+    if (!x || typeof x !== 'object') return true;
+    if (Array.isArray(x)) return x.every(walk);
+    if (x.k === 'enabled') { used = true; return true; }
+    if (x.k === 'app' && x.name === name && x.r === LOCAL) return false;
+    for (const key in x) {
+      if (key === 'r' || key === 'loc' || key === 'instDefs' || key === 'ld') continue;
+      const v = x[key];
+      if (v && typeof v === 'object' && !walk(v)) return false;
+    }
+    return true;
+  };
+  return (c[i] = walk(d.body) && used);
 }

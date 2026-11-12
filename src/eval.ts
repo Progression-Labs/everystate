@@ -154,6 +154,7 @@ const O_num = O.num, O_str = O.str, O_bool = O.bool, O_app = O.app, O_and = O.an
   O_recset = O.recset, O_except = O.except, O_tuple = O.tuple, O_fnapp = O.fnapp, O_dot = O.dot,
   O_boxact = O.boxact, O_angleact = O.angleact, O_lambda = O.lambda, O_at = O.at;
 
+const ENABLED_MARK = '\u0000enabled';
 const reducible = (s: SetBase) => s instanceof SetV || s instanceof IntervalV;
 
 class Found extends Error {}
@@ -399,10 +400,12 @@ export class Evaluator {
       if (b !== undefined) {
         if (this.inEnabled > 0 && this.primeDepth > 0 && r.k === 'var' && b instanceof Lazy) {
           const idx = this.asVar(n, ctx);
-          const v = this.cur[idx];
-          this.prTouch++;
-          if (v === undefined) return this.fail(`In evaluation, the identifier ${r.name} is either undefined or an operator.`, n);
-          return v;
+          if (idx >= 0) {
+            const v = this.cur[idx];
+            this.prTouch++;
+            if (v === undefined) return this.fail(`In evaluation, the identifier ${r.name} is either undefined or an operator.`, n);
+            return v;
+          }
         }
         if (b instanceof Lazy) return this.force(b);
         if (b instanceof Closure || b instanceof DefRef) return this.applyOp(b, n.args.map((a: Node) => this.mkArg(a, ctx)));
@@ -919,6 +922,13 @@ export class Evaluator {
   // ---------- ENABLED ----------
   enabled(a: Node, ctx: Ctx | null): boolean {
     const sn = this.nxt, im = this.initMode, na = this.nAssigned, cd = this.callDepth;
+    if (ctx !== null && ctx.base !== null && ctx.base.name !== ENABLED_MARK) {
+      // mark the instance environment the ENABLED is evaluated in (see asVar)
+      const env = new Ctx(ENABLED_MARK, true, ctx.base);
+      env.base = env;
+      ctx = new Ctx(ENABLED_MARK, true, ctx);
+      ctx.base = env;
+    }
     this.nxt = new Array(this.nvars);
     this.initMode = false;
     this.nAssigned = -1e9; // no all-assigned shortcut inside ENABLED
@@ -938,6 +948,7 @@ export class Evaluator {
   // Resolve an expression to a variable index if it denotes a variable (possibly through substitutions).
   asVar(e: Node, ctx: Ctx | null): number {
     for (let guard = 0; guard < 100; guard++) {
+      if (e.k === 'let') { ctx = this.bindLet(e.defs, ctx); e = e.body; continue; }
       if (e.k !== 'app' || e.args.length !== 0 || e.sel) return -1;
       const r = e.r as any;
       if (r === LOCAL) {
@@ -955,9 +966,12 @@ export class Evaluator {
       if (base !== null) {
         const b = this.envLookup(base, e.name);
         if (b instanceof Lazy) {
-          if (this.inEnabled > 0) {
-            const real = this.asVarPlain(b.e, b.ctx);
-            if (real >= 0) return real;
+          if (base.name === ENABLED_MARK) {
+            // Like TLC's context cut-off: a variable of an instantiated module that is reached from inside an
+            // ENABLED evaluated in that module stands for itself, not for the expression substituted for it
+            // (TLC identifies it by name, so it coincides with a root variable of the same name).
+            const same = this.varNames.indexOf(e.name);
+            if (same >= 0) return same;
             let si = this.scratch.get(r);
             if (si === undefined) { si = this.nvars + this.scratch.size; this.scratch.set(r, si); }
             return si;
@@ -969,12 +983,6 @@ export class Evaluator {
       return (r as Decl).idx;
     }
     return -1;
-  }
-
-  asVarPlain(e: Node, ctx: Ctx | null): number {
-    const save = this.inEnabled;
-    this.inEnabled = 0;
-    try { return this.asVar(e, ctx); } finally { this.inEnabled = save; }
   }
 
   // Enumerate all ways of satisfying `e`, assigning unassigned target variables (primed variables in
@@ -1130,7 +1138,9 @@ export class Evaluator {
     if (this.initMode) return lhs.k === 'app' ? this.asVar(lhs, ctx) : -1;
     if (this.nxt === null || this.primeDepth > 0) return -1;
     // look through operator parameters bound to primed variables, e.g. Send(p, d, mem, mem')
-    for (let guard = 0; lhs.k === 'app' && lhs.args.length === 0 && guard < 100; guard++) {
+    for (let guard = 0; guard < 100; guard++) {
+      if (lhs.k === 'let') { ctx = this.bindLet(lhs.defs, ctx); lhs = lhs.body; continue; }
+      if (lhs.k !== 'app' || lhs.args.length !== 0) break;
       if (lhs.r === LOCAL) {
         const b = this.lookup(ctx, lhs.name);
         if (!(b instanceof Lazy)) return -1;
