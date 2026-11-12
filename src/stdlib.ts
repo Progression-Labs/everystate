@@ -150,7 +150,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     }],
   });
 
-  const registers = new Map<number, Value>();
+  const registers = new Map<number | string, Value>();
   const TLC = module('TLC', [], {
     'Print': [2, (_, a) => { io.print(`${fmt(a[0])}  ${fmt(a[1])}`); return a[1]; }],
     'PrintT': [1, (_, a) => { io.print(fmt(a[0])); return true; }],
@@ -166,6 +166,17 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     'JavaTime': [0, () => Math.floor(Date.now() / 1000) & 0x7fffffff],
     'TLCGet': [1, (ev, a) => {
       if (typeof a[0] === 'string') {
+        const key = a[0];
+        if (key.startsWith('s:')) {
+          const v = registers.get(key);
+          if (v === undefined) fail(`TLCGet(${key}) was undefined.`);
+          return v;
+        }
+        if (key === 'all' || key === 'all:named') {
+          const pairs: [Value, Value][] = [];
+          for (const [k, v] of registers) if ((typeof k === 'string') === (key === 'all:named')) pairs.push([k, new TupleV([v])]);
+          return makeFcnFromPairs(pairs);
+        }
         const h = ev.hooks.tlcGet?.(a[0]);
         if (h === undefined) fail(`TLCGet(${fmt(a[0])}) is not supported.`);
         return h;
@@ -175,7 +186,11 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
       return v;
     }],
     'TLCSet': [2, (ev, a) => {
-      if (typeof a[0] === 'string') { ev.hooks.tlcSet?.(a[0], a[1]); return true; }
+      if (typeof a[0] === 'string') {
+        if (a[0].startsWith('s:')) registers.set(a[0], a[1]);
+        else ev.hooks.tlcSet?.(a[0], a[1]);
+        return true;
+      }
       registers.set(int(a[0], 'TLCSet', 0), a[1]);
       return true;
     }],
@@ -324,6 +339,33 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     'CopiesIn': [2, (_, a) => { const [d, v] = bagPairs(a[1], 'CopiesIn'); const k = bsearch(d, a[0]); return k >= 0 ? v[k] : 0; }],
   });
 
+  // ---- _Possible (support module of the _POSSIBLE config keyword) ----
+  const POSSIBLE_KEY = 's:_possible';
+  const possibleCounts = (): Value => registers.get(POSSIBLE_KEY) ?? EMPTY_TUPLE;
+  const Possible = module('_Possible', [], {
+    '_Track': [2, (_, a) => {
+      if (typeof a[0] !== 'boolean') fail(`Attempted to evaluate an expression of form IF P THEN ... ELSE ..., but P was the non-boolean value:\n${fmt(a[0])}`);
+      const old = possibleCounts();
+      const d = domainElems(old), v = fcnValues(old);
+      const pairs: [Value, Value][] = d.map((x, i) => [x, v[i]]);
+      const hit = pairs.find(p => p[0] === a[1]);
+      if (hit) { if (a[0]) hit[1] = (hit[1] as number) + 1; }
+      else pairs.push([a[1], a[0] ? 1 : 0]);
+      registers.set(POSSIBLE_KEY, makeFcnFromPairs(pairs));
+      return true;
+    }],
+    '_Counts': [0, () => possibleCounts()],
+    '_CheckName': [1, (_, a) => {
+      const c = possibleCounts();
+      const d = domainElems(c), v = fcnValues(c);
+      const i = d.indexOf(a[0]);
+      if (i >= 0 && v[i] !== 0) return true;
+      io.print(fmt(c));
+      return false;
+    }],
+    '_PrintCounts': [0, () => { io.print(fmt(possibleCounts())); return true; }],
+  });
+
   const subsetsOfSize = (b: Value[], k: number): Value[] => {
     const out: Value[] = [];
     const idx: number[] = [];
@@ -361,7 +403,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
   void subsetsOfSize; void compare; void Closure; void DefRef; void RecordV; void FcnV; void ModelValue;
 
   const m = new Map<string, ModuleInfo>();
-  for (const x of [Naturals, Integers, Reals, Sequences, FiniteSets, TLC, TLCExt, Bags, Randomization]) m.set(x.name, x);
+  for (const x of [Naturals, Integers, Reals, Sequences, FiniteSets, TLC, TLCExt, Bags, Randomization, Possible]) m.set(x.name, x);
   return m;
 }
 

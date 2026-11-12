@@ -1,4 +1,4 @@
 #!/usr/bin/env node
 import { runCli } from './main.ts';
-import { nodeHost } from './node-host.ts';
-runCli(process.argv.slice(2), nodeHost());
+import { runEntry } from './entry.ts';
+runEntry(import.meta.url, runCli);

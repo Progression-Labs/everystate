@@ -3,7 +3,7 @@
 // []<> (AE) and <>[] (EA) constraints plus a particle tableau for everything else).
 import type { Node } from './parser.ts';
 import type { Model, Pred, Action } from './model.ts';
-import { exprLevel, ConfigError } from './model.ts';
+import { exprLevel, ConfigError, locStr } from './model.ts';
 import { Checker } from './checker.ts';
 import type { CheckResult, TraceStep, CheckOptions } from './checker.ts';
 import type { Ctx } from './eval.ts';
@@ -619,6 +619,27 @@ export function modelCheck(model: Model, opts: CheckOptions): { result: CheckRes
       result = checker.result('error', { message: checker.describeErr(e) });
     }
     if (result.status === 'ok') opts.onLiveness?.('end', branches);
+  }
+  if (result.status === 'ok') {
+    const ev = model.ev;
+    for (const pc of model.postconditions) {
+      const at = `${pc.name} at ${locStr(pc.loc, pc.module)}`;
+      let ok: unknown;
+      try {
+        ev.cur = []; ev.nxt = null; ev.initMode = false; ev.primeDepth = 0; ev.callDepth = 0;
+        ok = ev.eval(pc.e, pc.ctx);
+      } catch (e) {
+        if (!(e instanceof TlaError)) throw e;
+        result = checker.result('error', { code: 2405, message: `Evaluating postcondition ${at} failed.\n${e.message}` });
+        break;
+      }
+      if (ok !== true) {
+        result = checker.result('error', pc.possible
+          ? { code: 2780, message: `The _POSSIBLE predicate ${at} was never witnessed.\nOthers may be unwitnessed too; only witnessed predicates appear with a\nnon-zero count in the record printed above.\nSee https://explain.tlapl.us/possible-conditions for additional details.` }
+          : { code: 2404, message: `Postcondition ${at} is false.` });
+        break;
+      }
+    }
   }
   result.liveBranches = branches;
   return { result, checker };

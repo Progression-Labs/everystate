@@ -66,13 +66,29 @@ export class Loader {
     this.builtins = builtins;
   }
 
+  extraSources = new Map<string, string>();
+  scanExtraModules(src: string): void {
+    const re = /^[ \t]*-{4,}[ \t]*MODULE[ \t]+(\w+)[ \t]*-{4,}/gm;
+    let m: RegExpExecArray | null, first = true;
+    while ((m = re.exec(src)) !== null) {
+      if (first) { first = false; continue; }
+      if (this.extraSources.has(m[1])) continue;
+      let nl = 0;
+      for (let k = 0; k < m.index; k++) if (src.charCodeAt(k) === 10) nl++;
+      this.extraSources.set(m[1], '\n'.repeat(nl) + src.slice(m.index));
+    }
+  }
+
   load(name: string, from?: string): ModuleInfo {
     const have = this.modules.get(name);
     if (have) return have;
     const b = this.builtins.get(name);
     if (b) { this.modules.set(name, b); return b; }
     if (this.loading.has(name)) throw new TlaError(`Circular dependency among modules involving ${name}`, undefined, name, 'semantic');
-    const src = this.resolveSource(name);
+    let src = this.resolveSource(name);
+    // A file may hold several top-level modules; the later ones are found by name when no file exists.
+    if (src === null) src = this.extraSources.get(name) ?? null;
+    else this.scanExtraModules(src);
     if (src === null) {
       throw new TlaError(`Cannot find source file for module ${name}${from ? ` imported in module ${from}` : ''}.`, undefined, from, 'semantic');
     }
