@@ -8,7 +8,7 @@ import { Evaluator, Ctx, Lazy, Closure, DefRef } from './eval.ts';
 import { buildStdlib, globalDefs } from './stdlib.ts';
 import { OVERRIDES } from './community.ts';
 import type { Config } from './cfg.ts';
-import { EvalError, SetBase, ModelValue, isFcn, domainElems, fcnValues, fmt } from './values.ts';
+import { EvalError, SetBase, ModelValue, isFcn, domainElems, fcnValues, fmt, strId, valEq } from './values.ts';
 import type { Value } from './values.ts';
 
 export interface Pred { name: string; e: Node; ctx: Ctx | null }
@@ -31,7 +31,7 @@ export interface Model {
   symmetry: Map<ModelValue, ModelValue>[] | null;
   view: Pred | null;
   alias: Pred | null;
-  postcondition: Pred | null;
+  postconditions: (Pred & { possible?: boolean; loc: Loc; module: string })[];
   checkDeadlock: boolean;
   warnings: string[];
 }
@@ -73,12 +73,30 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
   };
 
   // ---- constants ----
+  const opTables = new Map<Decl, { args: Value[]; value: Value }[]>();
   for (const c of cfg.constants) {
     const scope = c.module ? loader.modules.get(c.module) : root;
     const s = scope?.syms.get(c.name);
     if (!s) {
       if (c.subst !== undefined) throw new ConfigError(`The constant parameter ${c.name} is not a constant or operator of the specification.`);
       continue; // e.g. `a = a` just declares a model value
+    }
+    if (c.args) {
+      // F(v1, ..., vn) = value lines define a constant operator by a table
+      if (s.k !== 'const') throw new ConfigError(`The constant parameter ${c.name} is not a constant operator of the specification.`);
+      let tbl = opTables.get(s);
+      if (!tbl) {
+        tbl = [];
+        opTables.set(s, tbl);
+        const rows = tbl, nm = c.name;
+        const params = c.args.map((_, i) => ({ name: `p${i}`, arity: 0 }));
+        s.subst = { k: 'def', name: nm, params, body: null, module: s.module, local: false, loc: [0, 0, 0, 0], builtin: { fn: (_ev: any, a: any[]) => {
+          for (const r of rows) if (r.args.every((x, i) => valEq(x, a[i]))) return r.value;
+          throw new EvalError(`Attempted to apply the operator ${nm} to arguments (${a.map(x => fmt(x)).join(', ')}) for which the configuration file gives no value.`);
+        } } };
+      } else if (tbl[0].args.length !== c.args.length) throw new ConfigError(`The constant ${c.name} is given values with inconsistent arities in the configuration file.`);
+      tbl.push({ args: c.args, value: c.value });
+      continue;
     }
     if (c.subst !== undefined) {
       const target = root.syms.get(c.subst);
@@ -103,7 +121,7 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
   const model: Model = {
     rootName, root, loader, ev, vars, inits: [], actions: [], invariants: [], impliedInits: [], impliedActions: [],
     constraints: [], actionConstraints: [], fairness: [], liveProps: [], symmetry: null, view: null, alias: null,
-    postcondition: null, checkDeadlock: cfg.checkDeadlock ?? true, warnings,
+    postconditions: [], checkDeadlock: cfg.checkDeadlock ?? true, warnings,
   };
 
   // ---- invariants / constraints ----
@@ -117,7 +135,34 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
   for (const n of cfg.actionConstraints) model.actionConstraints.push({ name: n, e: mkApp(n, getDef(n, 'action constraint')), ctx: null });
   if (cfg.view) model.view = { name: cfg.view, e: mkApp(cfg.view, getDef(cfg.view, 'view')), ctx: null };
   if (cfg.alias) model.alias = { name: cfg.alias, e: mkApp(cfg.alias, getDef(cfg.alias, 'alias')), ctx: null };
-  if (cfg.postcondition) model.postcondition = { name: cfg.postcondition, e: mkApp(cfg.postcondition, getDef(cfg.postcondition, 'post condition')), ctx: null };
+  const bodyLoc = (d: Def): { loc: Loc; module: string } => {
+    let o = d.override ?? d;
+    while (o.inst) o = o.inst.orig;
+    return { loc: o.body?.loc ?? o.loc, module: o.body?.mod ?? o.module };
+  };
+  for (const n of cfg.postconditions) {
+    const d = getDef(n, 'post condition');
+    model.postconditions.push({ name: n, e: mkApp(n, d), ctx: null, ...bodyLoc(d) });
+  }
+  // _POSSIBLE P: count how often P holds (state predicates: per generated state; actions: per transition) and
+  // require a non-zero count once model checking has finished.
+  if (cfg.possible.length) {
+    const pm = loader.load('_Possible');
+    const track = pm.syms.get('_Track') as Def, check = pm.syms.get('_CheckName') as Def;
+    const str = (v: string): Node => ({ k: 'str', loc: [0, 0, 0, 0], v });
+    for (const n of cfg.possible) {
+      const s = root.syms.get(n);
+      if (!s) throw new ConfigError(`The possible ${n} specified in the configuration file\nis not defined in the specification.`);
+      if (s.k !== 'def') throw new ConfigError(`The possible ${n} specified in the configuration file\nis not a defined operator.`);
+      if (s.params.length) throw new ConfigError(`The possible ${n} specified in the configuration file\nrequires arguments.`);
+      const lv = defLevel(s);
+      if (lv >= 3) throw new ConfigError(`The possible ${n} specified in the configuration file\nis a temporal formula; only state- and action-level predicates are supported.`);
+      strId(n);
+      const e: Node = { k: 'app', loc: s.loc, name: '_Track', args: [mkApp(n, s), str(n)], r: track };
+      (lv <= 1 ? model.constraints : model.actionConstraints).push({ name: n, e, ctx: null });
+      model.postconditions.push({ name: n, e: { k: 'app', loc: s.loc, name: '_CheckName', args: [str(n)], r: check }, ctx: null, possible: true, ...bodyLoc(s) });
+    }
+  }
 
   // ---- behaviour spec ----
   let nextPred: { e: Node; ctx: Ctx | null; name: string } | null = null;

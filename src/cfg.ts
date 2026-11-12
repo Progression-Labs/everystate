@@ -4,7 +4,7 @@ import { modelValue, mkSet, strId } from './values.ts';
 import type { Value } from './values.ts';
 
 export interface Config {
-  constants: { name: string; value?: Value; subst?: string; module?: string }[];
+  constants: { name: string; value?: Value; subst?: string; module?: string; args?: Value[] }[];
   init?: string;
   next?: string;
   spec?: string;
@@ -15,14 +15,17 @@ export interface Config {
   symmetry?: string;
   view?: string;
   alias?: string;
-  postcondition?: string;
+  postconditions: string[];
+  possible: string[];
   checkDeadlock?: boolean;
 }
 
 const SECTIONS = new Set(['CONSTANT', 'CONSTANTS', 'INIT', 'NEXT', 'SPECIFICATION', 'INVARIANT', 'INVARIANTS',
   'PROPERTY', 'PROPERTIES', 'CONSTRAINT', 'CONSTRAINTS', 'ACTION_CONSTRAINT', 'ACTION_CONSTRAINTS', 'SYMMETRY',
-  'VIEW', 'CHECK_DEADLOCK', 'ALIAS', 'POSTCONDITION', 'TYPE', 'TYPE_CONSTRAINT']);
+  'VIEW', 'CHECK_DEADLOCK', 'ALIAS', 'POSTCONDITION', 'POSTCONDITIONS', '_POSSIBLE', '_PERIODIC', '_RL_REWARD', 'TYPE', 'TYPE_CONSTRAINT']);
 
+const OPCHARS = '+-*/^&|%$#?@<>:.~=';
+const OPCANON: Record<string, string> = { '\\circ': '\\o', '\\leq': '<=', '=<': '<=', '\\geq': '>=', '#': '/=', '\\neq': '/=', '\\union': '\\cup', '\\intersect': '\\cap', '\\mod': '%' };
 interface CTok { t: 'id' | 'num' | 'str' | 'sym' | 'eof'; v: string; line: number }
 
 function tokenize(src: string): CTok[] {
@@ -56,6 +59,15 @@ function tokenize(src: string): CTok[] {
     m = /^[A-Za-z0-9_!]+/.exec(src.slice(i, i + 400));
     if (m) { out.push({ t: 'id', v: m[0], line }); i += m[0].length; continue; }
     if (src.startsWith('<-', i)) { out.push({ t: 'sym', v: '<-', line }); i += 2; continue; }
+    // operator symbols (e.g. `++ <- PlusPlus`, `\\o <- +`)
+    m = /^\\[A-Za-z]+/.exec(src.slice(i, i + 40));
+    if (m) { out.push({ t: 'id', v: OPCANON[m[0]] ?? m[0], line }); i += m[0].length; continue; }
+    if (c !== '=' && OPCHARS.includes(c)) {
+      let j = i;
+      while (j < n && OPCHARS.includes(src[j]) && !(src.startsWith('<-', j) && j > i)) j++;
+      const sym = src.slice(i, j);
+      if (sym !== '<' || src[j] !== '-') { out.push({ t: 'id', v: OPCANON[sym] ?? sym, line }); i = j; continue; }
+    }
     out.push({ t: 'sym', v: c, line });
     i++;
   }
@@ -66,7 +78,7 @@ function tokenize(src: string): CTok[] {
 export function parseConfig(src: string): Config {
   const toks = tokenize(src);
   let p = 0;
-  const cfg: Config = { constants: [], invariants: [], properties: [], constraints: [], actionConstraints: [] };
+  const cfg: Config = { constants: [], invariants: [], properties: [], constraints: [], actionConstraints: [], postconditions: [], possible: [] };
   const fail = (msg: string): never => {
     throw new TlaError(`TLC found an error in the configuration file at line ${toks[p].line}\n${msg}`, undefined, undefined, 'config');
   };
@@ -107,11 +119,22 @@ export function parseConfig(src: string): Config {
       case 'CONSTANT': case 'CONSTANTS':
         while (toks[p].t === 'id' && !isSection()) {
           const name = toks[p++].v;
+          let args: Value[] | undefined;
+          if (toks[p].t === 'sym' && toks[p].v === '(') {
+            p++;
+            args = [];
+            for (;;) {
+              args.push(parseValue());
+              const s = toks[p++];
+              if (s.t === 'sym' && s.v === ')') break;
+              if (!(s.t === 'sym' && s.v === ',')) { p--; fail(`Expected ',' or ')' but found '${s.v}'`); }
+            }
+          }
           const op = toks[p++];
           if (op.t === 'sym' && op.v === '=') {
             let module: string | undefined;
             if (toks[p].t === 'sym' && toks[p].v === '[') { p++; module = toks[p++].v; p++; }
-            cfg.constants.push({ name, value: parseValue(), module });
+            cfg.constants.push({ name, value: parseValue(), module, args });
           } else if (op.t === 'sym' && op.v === '<-') {
             let module: string | undefined;
             if (toks[p].t === 'sym' && toks[p].v === '[') { p++; module = toks[p++].v; p++; }
@@ -129,7 +152,8 @@ export function parseConfig(src: string): Config {
       case 'SYMMETRY': cfg.symmetry = one('SYMMETRY'); break;
       case 'VIEW': cfg.view = one('VIEW'); break;
       case 'ALIAS': cfg.alias = one('ALIAS'); break;
-      case 'POSTCONDITION': cfg.postcondition = one('POSTCONDITION'); break;
+      case 'POSTCONDITION': case 'POSTCONDITIONS': names(cfg.postconditions); break;
+      case '_POSSIBLE': names(cfg.possible); break;
       case 'CHECK_DEADLOCK': {
         const v = one('CHECK_DEADLOCK');
         cfg.checkDeadlock = v === 'TRUE';
