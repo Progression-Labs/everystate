@@ -1,0 +1,19 @@
+{
+  "name": "verify.js",
+  "version": "0.1.0",
+  "description": "A TLA+ model checker (TLC-compatible) written in pure TypeScript. No Java.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "verify": "dist/cli.js", "tlc": "dist/cli.js" },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test test/*.test.ts",
+    "conformance": "node scripts/conformance.ts"
+  },
+  "devDependencies": { "typescript": "^5.8.0", "@types/node": "^22.0.0" }
+}
