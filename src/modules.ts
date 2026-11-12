@@ -52,7 +52,7 @@ export interface ModuleInfo {
 
 export type SourceResolver = (name: string) => string | null;
 
-interface Scope { names: Map<string, { used: boolean }>; parent: Scope | null }
+interface Scope { names: Map<string, { used: boolean; def?: Node }>; parent: Scope | null }
 
 export class Loader {
   modules = new Map<string, ModuleInfo>();
@@ -216,7 +216,7 @@ export class Loader {
     return info;
   }
 
-  lookupScope(scope: Scope | null, name: string): { used: boolean } | null {
+  lookupScope(scope: Scope | null, name: string): { used: boolean; def?: Node } | null {
     for (let s = scope; s; s = s.parent) {
       const e = s.names.get(name);
       if (e) return e;
@@ -233,7 +233,7 @@ export class Loader {
       case 'num': case 'str': case 'bool': case 'at': case 'stepref': return;
       case 'app': {
         const loc = this.lookupScope(scope, n.name);
-        if (loc) { loc.used = true; n.r = LOCAL; }
+        if (loc) { loc.used = true; n.r = LOCAL; if (loc.def) n.ld = loc.def; }
         else {
           const sym = mod.syms.get(n.name) ?? this.globals.get(n.name);
           if (!sym) {
@@ -250,6 +250,7 @@ export class Loader {
         const names = boundNames(n.bounds);
         if (n.k === 'fndef' && n.recname) names.push(n.recname);
         const s = push(names);
+        if (n.k === 'fndef' && n.recname) s.names.get(n.recname)!.def = n; // the function itself
         R(n.k === 'setmap' ? n.e : n.body, s);
         if (n.k === 'fndef' && n.recname) n.isRec = s.names.get(n.recname)!.used;
         return;
@@ -283,6 +284,7 @@ export class Loader {
           if (d.instDefs) for (const x of d.instDefs as Def[]) names.push(x.name);
         }
         const s = push(names);
+        for (const d of n.defs as Node[]) if (d.k === 'def' && d.params.length === 0) s.names.get(d.name)!.def = d;
         for (const d of n.defs as any[]) {
           if (d.k !== 'def') {
             const ds: Scope = d.params.length ? { names: new Map(d.params.map((p: Param) => [p.name, { used: false }])), parent: s } : s;
@@ -395,4 +397,31 @@ function collectRefs(n: any, out: Set<string>): void {
     const v = n[key];
     if (v && typeof v === 'object') collectRefs(v, out);
   }
+}
+
+// Can evaluating `n` yield a function constructor directly (through IF/CASE/LET/definitions)? TLC keeps such a
+// function unevaluated when it is immediately applied (f[x]) or is the body of a recursive function.
+export function tailFn(n: Node): boolean {
+  if (n.tf !== undefined) return n.tf;
+  n.tf = false; // recursion guard
+  let r = false;
+  switch (n.k) {
+    case 'fndef': r = true; break;
+    case 'if': r = tailFn(n.a[1]) || tailFn(n.a[2]); break;
+    case 'case': r = n.arms.some((a: { e: Node }) => tailFn(a.e)) || (n.other ? tailFn(n.other) : false); break;
+    case 'let': r = tailFn(n.body); break;
+    case 'fnapp': r = tailFn(n.f); break;
+    case 'app': {
+      if (n.sel) break;
+      const x = n.r as Sym | typeof LOCAL | undefined;
+      if (x === LOCAL) { if (n.ld && n.args.length === 0) r = n.ld.k === 'fndef' ? true : tailFn(n.ld.body); break; }
+      if (!x || x.k !== 'def') break;
+      let d: Def = x.override ?? x;
+      while (d.inst) { d = d.inst.orig; d = d.override ?? d; }
+      if (d.body && !d.builtin) r = tailFn(d.body);
+      break;
+    }
+  }
+  n.tf = r;
+  return r;
 }
