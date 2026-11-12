@@ -58,7 +58,8 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
     }
   }
   const ev = new Evaluator();
-  const vars = root.vars;
+  // TLC orders (and prints) variables by name
+  const vars = root.vars.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   vars.forEach((v, i) => { v.idx = i; });
   ev.nvars = vars.length;
   ev.varNames = vars.map(v => v.name);

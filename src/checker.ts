@@ -33,6 +33,7 @@ export interface CheckOptions {
   recordGraph?: boolean;
   onProgress?: (generated: number, distinct: number, queue: number) => void;
   maxDepth?: number;
+  onChecker?: (c: Checker) => void;
 }
 
 // Open-addressing hash set of 64-bit fingerprints (two int32 halves) mapping to state ids.
@@ -164,8 +165,15 @@ export class Checker {
   result(status: CheckResult['status'], extra: Partial<CheckResult> = {}): CheckResult {
     return {
       status, generated: this.generated, distinct: this.states.length, queue: Math.max(0, this.states.length - this.head),
-      depth: this.depth, initGenerated: this.initGenerated, initDistinct: this.initDistinct, printSummary: true, ...extra,
+      depth: this.depth, initGenerated: this.initGenerated, initDistinct: this.initDistinct, printSummary: true,
+      outdegree: this.outdegree(), ...extra,
     };
+  }
+
+  outdegree(): CheckResult['outdegree'] {
+    if (!this.outdeg.length) return undefined;
+    const d = this.outdeg.slice().sort((x, y) => x - y);
+    return { min: d[0], avg: Math.round(d.reduce((x, y) => x + y, 0) / d.length), p95: d[Math.min(d.length - 1, Math.ceil(d.length * 0.95) - 1)], max: d[d.length - 1] };
   }
 
   traceTo(id: number): TraceStep[] {
@@ -383,10 +391,6 @@ export class Checker {
       }
     }
     const r = this.result('ok');
-    if (this.outdeg.length) {
-      const d = this.outdeg.slice().sort((x, y) => x - y);
-      r.outdegree = { min: d[0], avg: Math.round(d.reduce((x, y) => x + y, 0) / d.length), p95: d[Math.min(d.length - 1, Math.ceil(d.length * 0.95) - 1)], max: d[d.length - 1] };
-    }
     return r;
   }
 }
