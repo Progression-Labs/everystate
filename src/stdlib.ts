@@ -3,7 +3,7 @@ import type { Def, ModuleInfo, Builtin } from './modules.ts';
 import type { Evaluator } from './eval.ts';
 import { Closure, DefRef } from './eval.ts';
 import {
-  EvalError, SetBase, SetV, IntervalV, InfSetV, SeqSetV, LazySetV, TupleV, RecordV, FcnV, ModelValue, modelValue,
+  EvalError, SetBase, SetV, IntervalV, InfSetV, SeqSetV, LazySetV, CrossV, RecSetV, FcnSetV, TupleV, RecordV, FcnV, ModelValue, modelValue,
   valEq, compare, mkSet, BOOLEAN_SET, makeFcn, makeFcnFromPairs, domainElems, fcnValues, isFcn, fmt, EMPTY_TUPLE, bsearch,
 } from './values.ts';
 import type { Value } from './values.ts';
@@ -32,6 +32,14 @@ export function set(v: Value, op: string, i: number): SetBase {
 function checkInt(n: number, what: string): number {
   if (n > 2147483647 || n < -2147483648) fail(`Overflow when computing ${what}`);
   return n;
+}
+
+// A product / function set / record set that an empty component makes empty although another one is infinite.
+function emptyProduct(x: SetBase): boolean {
+  const empty = (y: SetBase): boolean => y instanceof IntervalV ? y.hi < y.lo : y instanceof SetV ? y.e.length === 0 : emptyProduct(y);
+  if (x instanceof CrossV || x instanceof RecSetV) return x.sets.some(empty);
+  if (x instanceof FcnSetV) return empty(x.rng) && !empty(x.dom);
+  return false;
 }
 
 function module(name: string, exts: ModuleInfo[], defs: Record<string, Spec>): ModuleInfo {
@@ -64,13 +72,13 @@ export function globalDefs(): Map<string, Def> {
 
 export function buildStdlib(io: { print: (s: string) => void }): Map<string, ModuleInfo> {
   const Naturals = module('Naturals', [], {
-    '+': [2, (_, a) => checkInt(int(a[0], '+', 0) + int(a[1], '+', 1), `${a[0]} + ${a[1]}`)],
-    '-': [2, (_, a) => checkInt(int(a[0], '-', 0) - int(a[1], '-', 1), `${a[0]} - ${a[1]}`)],
-    '*': [2, (_, a) => checkInt(int(a[0], '*', 0) * int(a[1], '*', 1), `${a[0]} * ${a[1]}`)],
+    '+': [2, (_, a) => checkInt(int(a[0], '+', 0) + int(a[1], '+', 1), `${a[0]}+${a[1]}`)],
+    '-': [2, (_, a) => checkInt(int(a[0], '-', 0) - int(a[1], '-', 1), `${a[0]}-${a[1]}`)],
+    '*': [2, (_, a) => checkInt(int(a[0], '*', 0) * int(a[1], '*', 1), `${a[0]}*${a[1]}`)],
     '^': [2, (_, a) => {
       const b = int(a[0], '^', 0), e = int(a[1], '^', 1);
       if (e < 0) fail(`The second argument of ^ should be a natural number, but instead it is:\n${e}`);
-      return checkInt(b ** e, `${b} ^ ${e}`);
+      return checkInt(b ** e, `${b}^${e}`);
     }],
     '<': [2, (_, a) => int(a[0], '<', 0) < int(a[1], '<', 1)],
     '>': [2, (_, a) => int(a[0], '>', 0) > int(a[1], '>', 1)],
@@ -145,7 +153,10 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     'IsFiniteSet': [1, (_, a) => set(a[0], 'IsFiniteSet', 0).enumerable()],
     'Cardinality': [1, (_, a) => {
       const s = set(a[0], 'Cardinality', 0);
-      if (!s.enumerable()) fail(`Attempted to compute the cardinality of the infinite set ${fmt(s)}`);
+      if (!s.enumerable()) {
+        if (emptyProduct(s)) return 0;
+        fail(`Attempted to compute the cardinality of the infinite set ${fmt(s)}`);
+      }
       return s.size();
     }],
   });
@@ -292,7 +303,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
       const out: [Value, number][] = d0.map((d, i) => [d, v0[i]]);
       for (let i = 0; i < d1.length; i++) {
         const k = bsearch(d0, d1[i]);
-        if (k >= 0) out[k][1] += v1[i]; else out.push([d1[i], v1[i]]);
+        if (k >= 0) out[k][1] = checkInt(out[k][1] + v1[i], `${out[k][1]}+${v1[i]}`); else out.push([d1[i], v1[i]]);
       }
       return mkBag(out);
     }],
@@ -306,7 +317,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
         const [d, v] = bagPairs(b, 'BagUnion');
         for (let i = 0; i < d.length; i++) {
           const hit = out.find(p => valEq(p[0], d[i]));
-          if (hit) hit[1] += v[i]; else out.push([d[i], v[i]]);
+          if (hit) hit[1] = checkInt(hit[1] + v[i], `${hit[1]}+${v[i]}`); else out.push([d[i], v[i]]);
         }
       }
       return mkBag(out);
@@ -336,7 +347,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
       }
       return mkBag(out);
     }, { ops: [0] }],
-    'BagCardinality': [1, (_, a) => bagPairs(a[0], 'BagCardinality')[1].reduce((x, y) => x + y, 0)],
+    'BagCardinality': [1, (_, a) => bagPairs(a[0], 'BagCardinality')[1].reduce((x, y) => checkInt(x + y, `${x}+${y}`), 0)],
     'CopiesIn': [2, (_, a) => { const [d, v] = bagPairs(a[1], 'CopiesIn'); const k = bsearch(d, a[0]); return k >= 0 ? v[k] : 0; }],
   });
 
@@ -377,27 +388,81 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     rec(0, k);
     return out;
   };
+  // A set known to be empty without enumerating it (components are asked in order, like TLC).
+  const knownEmpty = (x: SetBase): boolean => {
+    if (x instanceof CrossV) return x.sets.some(knownEmpty);
+    if (x instanceof RecSetV) return x.sets.some(knownEmpty);
+    if (x instanceof FcnSetV) return knownEmpty(x.rng) && !knownEmpty(x.dom);
+    if (x instanceof IntervalV) return x.hi < x.lo;
+    if (x instanceof SetV) return x.e.length === 0;
+    if (x instanceof InfSetV) return false;
+    return x.enumerable() && x.size() === 0;
+  };
+  // A uniformly drawn element of a non-empty finite set, without enumerating products and function sets.
+  const randomElem = (ev: Evaluator, x: SetBase): Value => {
+    const rnd = (n: number) => Math.min(n - 1, Math.floor(ev.hooks.random() * n));
+    if (x instanceof IntervalV) return x.lo + rnd(x.hi - x.lo + 1);
+    if (x instanceof CrossV) return new TupleV(x.sets.map(c => randomElem(ev, c)));
+    if (x instanceof RecSetV) return new RecordV(x.names, x.sets.map(c => randomElem(ev, c)));
+    if (x instanceof FcnSetV) { const d = x.dom.elems(); return makeFcn(d, d.map(() => randomElem(ev, x.rng))); }
+    const e = x.elems();
+    return e[rnd(e.length)];
+  };
+  const finiteSet = (v: Value, op: string, i: number, what: string): SetBase => {
+    if (v instanceof SetBase && (knownEmpty(v) || v.enumerable())) return v;
+    return fail(`The ${ORD[i]} argument of ${op} should be a ${what}, but instead it is:\n${fmt(v)}`);
+  };
+  const cardOf = (x: SetBase): number => knownEmpty(x) ? 0 : x.size();
+  const randomSubset = (ev: Evaluator, k: number, x: SetBase): Value => {
+    const n = cardOf(x);
+    if (n === 0) return mkSet([]);
+    if (k >= n) return mkSet(x.elems().slice());
+    if (n <= 4 * k || n <= 64) {
+      const e = x.elems().slice();
+      for (let i = e.length - 1; i > 0; i--) { const j = Math.floor(ev.hooks.random() * (i + 1)); [e[i], e[j]] = [e[j], e[i]]; }
+      return mkSet(e.slice(0, k));
+    }
+    let out: Value[] = [];
+    while (out.length < k) {
+      const more: Value[] = [];
+      for (let i = out.length; i < k; i++) more.push(randomElem(ev, x));
+      out = mkSet(out.concat(more)).elems();
+    }
+    return new SetV(out);
+  };
+  const randomSetOfSubsets = (ev: Evaluator, picks: number, p: number, x: SetBase): Value => {
+    const e = x.elems();
+    const out: Value[] = [];
+    for (let i = 0; i < picks; i++) out.push(new SetV(e.filter(() => ev.hooks.random() < p)));
+    return mkSet(out);
+  };
+  const tooManyPicks = (picks: number, n: number, op: string): void => {
+    if (32 - Math.clz32(picks) > n && picks > 2 ** n) fail(`The first argument of ${op} should be a nonnegative integer that is smaller than the subset's size of 2^${n}, but instead it is:\n${picks}`);
+  };
   const Randomization = module('Randomization', [], {
     'RandomSubset': [2, (ev, a) => {
-      const k = int(a[0], 'RandomSubset', 0), s = set(a[1], 'RandomSubset', 1).elems().slice();
-      if (k < 0 || k > s.length) fail(`The first argument of RandomSubset should be between 0 and the cardinality of the set, but it is ${k}`);
-      for (let i = s.length - 1; i > 0; i--) { const j = Math.floor(ev.hooks.random() * (i + 1)); [s[i], s[j]] = [s[j], s[i]]; }
-      return mkSet(s.slice(0, k));
+      if (typeof a[0] !== 'number') fail(`The first argument of RandomSubset should be a nonnegative integer, but instead it is:\n${fmt(a[0])}`);
+      const x = finiteSet(a[1], 'RandomSubset', 1, 'a finite set');
+      if (a[0] < 0) fail(`Attempted to apply the operator overridden by the Java method\npublic static tlc2.value.impl.Value tlc2.module.Randomization.RandomSubset(tlc2.value.impl.Value,tlc2.value.impl.Value),\nbut it produced the following error:\n${a[0]}`);
+      return randomSubset(ev, a[0], x);
     }],
     'RandomSetOfSubsets': [3, (ev, a) => {
-      const k = int(a[0], 'RandomSetOfSubsets', 0), n = int(a[1], 'RandomSetOfSubsets', 1), s = set(a[2], 'RandomSetOfSubsets', 2).elems();
-      const out: Value[] = [];
-      for (let i = 0; i < k; i++) {
-        const pick = s.filter(() => ev.hooks.random() < (s.length ? n / s.length : 0));
-        out.push(new SetV(pick));
-      }
-      return mkSet(out);
+      if (typeof a[0] !== 'number' || a[0] < 0) fail(`The first argument of RandomSetOfSubsets should be a nonnegative integer, but instead it is:\n${fmt(a[0])}`);
+      if (typeof a[1] !== 'number' || a[1] < 0) fail(`The second argument of RandomSetOfSubsets should be a nonnegative integer, but instead it is:\n${fmt(a[1])}`);
+      const x = finiteSet(a[2], 'RandomSetOfSubsets', 2, 'finite set');
+      const n = cardOf(x);
+      tooManyPicks(a[0], n, 'RandomSetOfSubsets');
+      if (n < a[1]) fail(`The second argument of RandomSetOfSubsets should be a nonnegative integer in range 0..Cardinality(S), but instead it is:\n${fmt(a[1])}`);
+      return randomSetOfSubsets(ev, a[0], n === 0 ? 0 : a[1] / n, x);
     }],
     'RandomSubsetSet': [3, (ev, a) => {
-      const k = int(a[0], 'RandomSubsetSet', 0), s = set(a[2], 'RandomSubsetSet', 2).elems();
-      const out: Value[] = [];
-      for (let i = 0; i < k; i++) out.push(new SetV(s.filter(() => ev.hooks.random() < 0.5)));
-      return mkSet(out);
+      if (typeof a[0] !== 'number' || a[0] < 0) fail(`The first argument of RandomSubsetSetProbability should be a nonnegative integer, but instead it is:\n${fmt(a[0])}`);
+      const p = typeof a[1] === 'string' && a[1].trim() !== '' ? Number(a[1]) : NaN;
+      if (typeof a[1] !== 'string') fail(`The second argument of RandomSubsetSetProbability should be a string literal representing a probability, but instead it is:\n${fmt(a[1])}`);
+      if (Number.isNaN(p) || p < 0 || p > 1) fail(`The second argument of RandomSubsetSetProbability should be a string literal does not represent a parsable probability, but instead it is:\n${fmt(a[1])}`);
+      const x = finiteSet(a[2], 'RandomSubsetSetProbability', 2, 'finite set');
+      tooManyPicks(a[0], cardOf(x), 'RandomSubsetSetProbability');
+      return randomSetOfSubsets(ev, a[0], p, x);
     }],
     'TestRandomSetOfSubsets': [3, () => true],
   });
