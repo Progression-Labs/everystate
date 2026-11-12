@@ -62,11 +62,8 @@ export class LazyFcn {
     this.ctx = node.recname ? cons(node.recname, this, ctx) : ctx;
   }
   describe(): string { return '<lazy function>'; }
-  apply(arg: Value): Value {
+  bind(arg: Value): Ctx | null {
     const ev = this.ev;
-    const key = typeof arg === 'number' || typeof arg === 'string' ? arg : '\u0001' + fmt(arg);
-    const hit = this.memo.get(key);
-    if (hit !== undefined) return hit;
     const bounds = this.node.bounds as Bound[];
     let c = this.ctx;
     const one = bounds.length === 1 && (bounds[0].tuple !== null || bounds[0].names!.length === 1);
@@ -89,6 +86,14 @@ export class LazyFcn {
       }
       if (i !== arg.e.length) throw new EvalError(`Attempted to apply function to argument ${fmt(arg)}, which is not in the domain of the function.`);
     }
+    return c;
+  }
+  apply(arg: Value): Value {
+    const ev = this.ev;
+    const key = typeof arg === 'number' || typeof arg === 'string' ? arg : '\u0001' + fmt(arg);
+    const hit = this.memo.get(key);
+    if (hit !== undefined) return hit;
+    const c = this.bind(arg);
     const s0 = ev.stTouch, p0 = ev.prTouch;
     const v = ev.eval(this.node.body, c);
     if (ev.stTouch === s0 && ev.prTouch === p0) this.memo.set(key, v);
@@ -151,7 +156,7 @@ export class Evaluator {
 
   fail(msg: string, n?: Node): never {
     const e = new EvalError(msg);
-    if (n) e.loc = n.loc;
+    if (n) { e.loc = n.loc; e.module = n.mod; }
     throw e;
   }
 
@@ -285,6 +290,7 @@ export class Evaluator {
     let body = res.body;
     for (const s of n.sel) {
       const kids: Node[] | undefined = body.a ?? body.args ?? (body.body ? [body.body] : undefined);
+      if (s === ':') continue;
       const i = s === '<<' ? 0 : s === '>>' ? 1 : typeof s === 'number' ? s - 1 : -1;
       if (!kids || i < 0 || i >= kids.length) this.fail(`Unsupported subexpression selector in ${n.name}`, n);
       body = kids![i];
@@ -398,7 +404,13 @@ export class Evaluator {
     return v;
   }
   evalElems(n: Node, ctx: Ctx | null): Value[] {
-    return this.evalSet(n, ctx).elems();
+    const s = this.evalSet(n, ctx);
+    try {
+      return s.elems();
+    } catch (e) {
+      if (e instanceof TlaError && !e.loc) { e.loc = n.loc; e.module = n.mod; }
+      throw e;
+    }
   }
 
   // Iterate over all bindings of a list of bounds; f returns true to stop. Returns true if stopped.
@@ -559,8 +571,7 @@ export class Evaluator {
       case O_choose: {
         const b = n.bound as Bound;
         if (b.set === null) return this.fail('TLC attempted to evaluate an unbounded CHOOSE.\nMake sure that the expression is of form CHOOSE x \\in S: P(x).', n);
-        const s = this.evalSet(b.set, ctx);
-        const es = s.elems();
+        const es = this.evalElems(b.set, ctx);
         for (let i = 0; i < es.length; i++) {
           const c = b.tuple ? this.bindTuple(b.tuple, es[i], ctx) : new Ctx(b.names![0], es[i], ctx);
           if (this.evalBool(n.body, c)) return es[i];
@@ -904,6 +915,16 @@ export class Evaluator {
       case 'unchanged':
         if (!this.initMode) { this.enumUnchanged(e.a[0], ctx, k); return; }
         break;
+      case 'fnapp': {
+        // TLC enters the body of a lazily evaluated (recursive) function
+        const f = e.f.k === 'app' ? this.evalApp(e.f, ctx) : this.eval(e.f, ctx);
+        if (f instanceof LazyFcn) {
+          const arg = e.args.length === 1 ? this.eval(e.args[0], ctx) : new TupleV(e.args.map((a: Node) => this.eval(a, ctx)));
+          this.enumerate(f.node.body, f.bind(arg), k);
+          return;
+        }
+        break;
+      }
       case 'boxact':
         if (!this.initMode) {
           this.enumerate(e.a[0], ctx, k);

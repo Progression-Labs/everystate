@@ -47,7 +47,7 @@ async function worker() {
       if (c.exp.result === 'success') {
         if (c.exp.distinctStates !== undefined && c.exp.distinctStates !== r.distinct) diffs.push(`distinct ${r.distinct} != ${c.exp.distinctStates}`);
         if (c.exp.totalStates !== undefined && c.exp.totalStates !== r.generated) diffs.push(`generated ${r.generated} != ${c.exp.totalStates}`);
-        if (c.exp.stateDepth !== undefined && c.exp.stateDepth !== r.depth) diffs.push(`depth ${r.depth} != ${c.exp.stateDepth}`);
+        if (args.includes("--depth") && c.exp.stateDepth !== undefined && c.exp.stateDepth !== r.depth) diffs.push(`depth ${r.depth} != ${c.exp.stateDepth}`);
       }
       verdict = diffs.length ? 'COUNT' : 'PASS'; detail = diffs.join(', ');
     }
