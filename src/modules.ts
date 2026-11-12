@@ -212,6 +212,7 @@ export class Loader {
     const R = (x: Node | null | undefined, s: Scope | null = scope) => { if (x) this.resolve(x, s, mod); };
     const push = (names: string[]): Scope => ({ names: new Map(names.map(x => [x, { used: false }])), parent: scope });
     const boundNames = (bs: Bound[]) => bs.flatMap(b => b.names ?? b.tuple ?? []);
+    n.mod = mod.name;
     switch (n.k) {
       case 'num': case 'str': case 'bool': case 'at': case 'stepref': return;
       case 'app': {
@@ -343,8 +344,39 @@ export function defLevel(d: Def): number {
   let l = 0;
   if (d.inst) {
     l = defLevel(d.inst.orig);
-    for (const s of d.inst.substs) l = Math.max(l, levelOf(s.e));
+    const refs = declRefs(d.inst.orig);
+    for (const s of d.inst.substs) if (refs.has(s.name)) l = Math.max(l, levelOf(s.e));
   } else if (d.body) l = levelOf(d.body);
   d.level = l;
   return l;
+}
+
+// Names of CONSTANT/VARIABLE declarations a definition (transitively) depends on.
+const refCache = new Map<Def, Set<string>>();
+export function declRefs(d: Def): Set<string> {
+  const have = refCache.get(d);
+  if (have) return have;
+  const out = new Set<string>();
+  refCache.set(d, out);
+  if (d.inst) {
+    const inner = declRefs(d.inst.orig);
+    for (const s of d.inst.substs) if (inner.has(s.name)) collectRefs(s.e, out);
+  } else if (d.body) collectRefs(d.body, out);
+  return out;
+}
+function collectRefs(n: any, out: Set<string>): void {
+  if (!n || typeof n !== 'object') return;
+  if (Array.isArray(n)) { for (const x of n) collectRefs(x, out); return; }
+  if (n.k === 'app') {
+    const r = n.r;
+    if (r && r !== LOCAL) {
+      if (r.k === 'def') for (const x of declRefs(r)) out.add(x);
+      else out.add(r.name);
+    }
+  }
+  for (const key in n) {
+    if (key === 'r' || key === 'loc' || key === 'instDefs') continue;
+    const v = n[key];
+    if (v && typeof v === 'object') collectRefs(v, out);
+  }
 }

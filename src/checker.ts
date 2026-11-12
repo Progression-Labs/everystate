@@ -203,7 +203,7 @@ export class Checker {
     if (e instanceof RangeError) return 'Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.';
     if (e instanceof TlaError) {
       let m = e.message;
-      if (e.loc && e.loc[0] > 0) m += `\n(evaluating the expression at line ${e.loc[0]}, col ${e.loc[1]} to line ${e.loc[2]}, col ${e.loc[3]})`;
+      if (e.loc && e.loc[0] > 0) m += `\n(evaluating the expression at line ${e.loc[0]}, col ${e.loc[1]} to line ${e.loc[2]}, col ${e.loc[3]} of module ${e.module ?? '?'})`;
       return m;
     }
     throw e;
