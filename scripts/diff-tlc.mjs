@@ -41,7 +41,7 @@ function summarise(r) {
   else if (/Deadlock reached/.test(o)) kind = 'deadlock';
   else if (/Action property .* is violated/.test(o)) kind = 'action-property';
   else if (/Property .* is violated by the initial state/.test(o)) kind = 'implied-init';
-  else if (/Temporal properties were violated/.test(o)) kind = 'liveness';
+  else if (/Temporal propert(ies were|y .* was) violated/.test(o)) kind = 'liveness';
   else if (/Assumption .* is false/.test(o)) kind = 'assumption';
   else if (/not completely specified/.test(o)) kind = 'incomplete';
   else if (/Parsing or semantic analysis failed|Fatal errors while parsing|\*\*\* Errors:/.test(o)) kind = 'parse-error';

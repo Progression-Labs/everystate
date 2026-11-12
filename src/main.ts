@@ -25,6 +25,12 @@ export interface Host {
   exit: (code: number) => void;
   env?: Record<string, string | undefined>;
   libraryPaths?: string[];
+  io?: {
+    readFile(p: string): string; writeFile(p: string, d: string): void; appendFile(p: string, d: string): void; exists(p: string): boolean;
+    readBytes?(p: string): Uint8Array; writeBytes?(p: string, d: Uint8Array): void;
+    exec?(command: string[], env?: Record<string, string>): { exitValue: number; stdout: string; stderr: string };
+    env: Record<string, string>;
+  };
 }
 
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -150,10 +156,10 @@ export function runCli(argv: string[], host: Host): void {
     finish(150);
     return;
   }
-  model.ev.hooks.io = {
+  model.ev.hooks.io = host.io ?? {
     readFile: (p: string) => host.fs.readFileSync(p, 'utf8'),
     writeFile: (p: string, d: string) => host.fs.writeFileSync(p, d),
-    appendFile: (p: string, d: string) => (host.fs.appendFileSync ? host.fs.appendFileSync(p, d) : host.fs.writeFileSync(p, (host.fs.existsSync(p) ? host.fs.readFileSync(p, 'utf8') : '') + d)),
+    appendFile: (p: string, d: string) => host.fs.writeFileSync(p, (host.fs.existsSync(p) ? host.fs.readFileSync(p, 'utf8') : '') + d),
     exists: (p: string) => host.fs.existsSync(p),
     env: host.env ?? {},
   };
