@@ -93,6 +93,12 @@ export class Liveness {
         return mkJunc('or', [mkJunc('and', [a, b]), mkJunc('and', [mkNot(a), mkNot(b)])]);
       }
       case 'if': {
+        if (exprLevel(ev, e.a[0], ctx) === 0) {
+          // constant guard: translate only the chosen branch (lets recursive temporal operators terminate)
+          let gv: unknown;
+          try { ev.cur = []; ev.nxt = null; ev.initMode = false; gv = ev.eval(e.a[0], ctx); } catch (err) { if (!(err instanceof TlaError)) throw err; }
+          if (typeof gv === 'boolean') return this.toLive(gv ? e.a[1] : e.a[2], ctx);
+        }
         const g = this.toLive(e.a[0], ctx);
         return mkJunc('or', [mkJunc('and', [g, this.toLive(e.a[1], ctx)]), mkJunc('and', [mkNot(g), this.toLive(e.a[2], ctx)])]);
       }

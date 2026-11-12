@@ -119,13 +119,15 @@ export class Checker {
     this.opts = opts;
     this.nvars = model.vars.length;
     this.ev.hooks.tlcGet = (k: string) => this.tlcGet(k);
+    this.ev.hooks.tlcSet = (k: string, v: Value) => { if (k === 'exit' && v === true) this.stopRequested = true; };
     if (!this.ev.hooks.random) this.ev.hooks.random = Math.random;
   }
 
-  curLevel = 1;
+  curLevel = 0; // level of the state `ev.cur` refers to (0 before/during the initial predicate)
+  stopRequested = false; // TLCSet("exit", TRUE): finish the current state, then stop
   tlcGet(k: string): Value {
     switch (k) {
-      case 'level': return this.curLevel;
+      case 'level': return this.curLevel + (this.ev.primeDepth > 0 ? 1 : 0);
       case 'distinct': return this.states.length;
       case 'generated': return this.generated;
       case 'queue': return this.states.length - this.head;
@@ -273,6 +275,7 @@ export class Checker {
       return this.result('error', { message: this.describeErr(e) });
     }
     ev.initMode = false;
+    this.curLevel = 1;
     for (const s of found) {
       this.generated++;
       this.initGenerated++;
@@ -348,7 +351,7 @@ export class Checker {
     const record = !!this.opts.recordGraph;
     let lastProgress = Date.now();
     if (m.actions.length === 0 || m.inits.length === 0) return this.result('ok');
-    while (this.head < this.states.length) {
+    while (this.head < this.states.length && !this.stopRequested) {
       const sid = this.head++;
       const s = this.states[sid];
       this.curLevel = this.level[sid];
@@ -361,13 +364,17 @@ export class Checker {
       }
       if (this.ev.extraGenerated) { this.generated += this.ev.extraGenerated; this.ev.extraGenerated = 0; }
       let fresh = 0;
+      const lvl = this.curLevel;
       for (let i = 0; i < succs.length; i++) {
         const t = succs[i];
         this.generated++;
         let inModel = true, unseen = true, id = -1;
         try {
+          this.curLevel = lvl + 1;
           for (const c of m.constraints) if (!this.evalPred(c, t, null)) { inModel = false; break; }
+          this.curLevel = lvl;
           if (inModel) for (const c of m.actionConstraints) if (!this.evalPred(c, s, t)) { inModel = false; break; }
+          this.curLevel = lvl + 1;
           if (inModel) {
             this.fingerprint(t);
             const nid = this.states.length;
@@ -402,6 +409,7 @@ export class Checker {
             }
           }
         }
+        this.curLevel = lvl;
         for (const p of m.impliedActions) {
           let ok: boolean;
           try { ok = this.evalPred(p, s, t); } catch (e) {

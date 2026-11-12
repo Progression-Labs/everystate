@@ -308,7 +308,15 @@ export class Evaluator {
       const d = op.def.override ?? op.def;
       if (d.builtin) return d.builtin.lazy ? d.builtin.fn(this, args) : d.builtin.fn(this, args.map(a => this.unthunk(a)));
     } else if (!(op instanceof Closure)) return this.fail(`Attempted to apply a non-operator value ${fmt(op)} as an operator.`);
-    const r = this.expandOp(op, args)!;
+    const r = this.expandOp(op, args);
+    if (r === null) {
+      // instance of a builtin operator (e.g. LET T == INSTANCE TLC IN T!PrintT(x))
+      let d = (op as DefRef).def;
+      d = d.override ?? d;
+      while (d.inst) { args = d.inst.nparams ? args.slice(d.inst.nparams) : args; d = d.inst.orig; d = d.override ?? d; }
+      const bi = d.builtin!;
+      return bi.lazy ? bi.fn(this, args) : bi.fn(this, args.map((a, i) => bi.ops && bi.ops.includes(i) ? a : this.unthunk(a)));
+    }
     return this.eval(r.body, r.ctx);
   }
 

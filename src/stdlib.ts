@@ -165,6 +165,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     }],
     'JavaTime': [0, () => Math.floor(Date.now() / 1000) & 0x7fffffff],
     'TLCGet': [1, (ev, a) => {
+      ev.stTouch++; // never a constant: definitions using it must not be cached
       if (typeof a[0] === 'string') {
         const key = a[0];
         if (key.startsWith('s:')) {
@@ -269,8 +270,8 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
       return old;
     }, { ops: [1] }],
     'TLCFP': [1, (ev, a) => ev.hooks.fp?.(a[0]) ?? 0],
-    'Trace': [0, ev => ev.hooks.trace?.() ?? fail('Trace is not available in this context.')],
-    'CounterExample': [0, ev => ev.hooks.counterExample?.() ?? fail('CounterExample is not available in this context.')],
+    'Trace': [0, ev => (ev.stTouch++, ev.hooks.trace?.()) ?? fail('Trace is not available in this context.')],
+    'CounterExample': [0, ev => (ev.stTouch++, ev.hooks.counterExample?.()) ?? fail('CounterExample is not available in this context.')],
     'ToTrace': [1, () => fail('ToTrace is not supported.')],
   });
 
@@ -354,7 +355,7 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
       registers.set(POSSIBLE_KEY, makeFcnFromPairs(pairs));
       return true;
     }],
-    '_Counts': [0, () => possibleCounts()],
+    '_Counts': [0, ev => { ev.stTouch++; return possibleCounts(); }],
     '_CheckName': [1, (_, a) => {
       const c = possibleCounts();
       const d = domainElems(c), v = fcnValues(c);
