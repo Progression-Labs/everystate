@@ -78,7 +78,7 @@ export class IntervalV extends SetBase {
   lo: number; hi: number;
   private cache: Value[] | null = null;
   constructor(lo: number, hi: number) { super(); this.lo = lo; this.hi = hi; }
-  contains(v: Value): boolean { return typeof v === 'number' ? Number.isInteger(v) && v >= this.lo && v <= this.hi : (typeof v === 'object' && v instanceof ModelValue ? false : err(`Attempted to check if the value:\n${fmt(v)}\nis in the integer interval ${fmt(this)}`)); }
+  contains(v: Value): boolean { return typeof v === 'number' ? Number.isInteger(v) && v >= this.lo && v <= this.hi : (this.hi < this.lo || (typeof v === 'object' && v instanceof ModelValue) ? false : err(`Attempted to check if the value:\n${fmt(v)}\nis in the integer interval ${fmt(this)}`)); }
   elems(): Value[] {
     if (!this.cache) {
       const a: number[] = [];
