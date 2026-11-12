@@ -180,6 +180,7 @@ export class Liveness {
   // ---- graph ----
   S = 0;
   eStart!: Int32Array; eTo!: Int32Array; eAct!: Int32Array;
+  eState: (any[] | undefined)[] | null = null;
   stateCache = new Map<string, Uint8Array>();
   edgeCache = new Map<string, Uint8Array>();
 
@@ -188,6 +189,7 @@ export class Liveness {
     const S = this.S = c.states.length;
     let E = S;
     for (let i = 0; i < S; i++) E += c.succ[i].length;
+    if (c.succState) this.eState = new Array(E);
     this.eStart = new Int32Array(S + 1);
     this.eTo = new Int32Array(E);
     this.eAct = new Int32Array(E);
@@ -196,12 +198,14 @@ export class Liveness {
       this.eStart[i] = p;
       const su = c.succ[i], sa = c.succAct[i];
       const seen = new Set<number>();
+      const real = c.succState ? c.succState[i] : undefined;
       for (let j = 0; j < su.length; j++) {
-        if (seen.has(su[j])) continue;
+        if (!real && seen.has(su[j])) continue;
         seen.add(su[j]);
+        if (real) this.eState![p] = real[j];
         this.eTo[p] = su[j]; this.eAct[p] = sa[j]; p++;
       }
-      if (!seen.has(i)) { this.eTo[p] = i; this.eAct[p] = -1; p++; } // stuttering self-loop
+      if (!seen.has(i) || real) { this.eTo[p] = i; this.eAct[p] = -1; p++; } // stuttering self-loop
     }
     this.eStart[S] = p;
   }
@@ -224,28 +228,28 @@ export class Liveness {
         if (e < 0) throw new ConfigError('TLC cannot handle a temporal formula with an action in a state-level position.');
         let cache = this.edgeCache.get('a' + x.id);
         if (!cache) { cache = new Uint8Array(this.eTo.length); this.edgeCache.set('a' + x.id, cache); }
-        if (cache[e] === 0) cache[e] = c.evalPred(x as unknown as Pred, c.states[s], c.states[this.eTo[e]]) ? 2 : 1;
+        if (cache[e] === 0) cache[e] = c.evalPred(x as unknown as Pred, c.states[s], this.eState?.[e] ?? c.states[this.eTo[e]]) ? 2 : 1;
         return cache[e] === 2;
       }
     }
     throw new Error('temporal operator in evalLE');
   }
 
-  check(): CheckResult | null {
+  groups: Map<string, { tf: LE; pems: { aeState: LE[]; aeAction: LE[]; ea: LE[] }[] }> | null = null;
+
+  // Normalise the temporal formulas; returns the number of tableau branches (0 = nothing to check).
+  prepare(): number {
     const m = this.model;
-    if (m.liveProps.length === 0) return null;
+    const groups = new Map<string, { tf: LE; pems: { aeState: LE[]; aeAction: LE[]; ea: LE[] }[] }>();
+    this.groups = groups;
+    if (m.liveProps.length === 0) return 0;
     const fair = mkJunc('and', m.fairness.map(f => this.toLive(f.e, f.ctx)));
     const props = m.liveProps.map(p => this.toLive(p.e, p.ctx));
     const formula = mkJunc('and', [fair, mkJunc('or', props.map(p => mkNot(p)))]);
     const nf = this.simp(this.pushNeg(formula, false));
     const disjuncts = this.dnf(nf);
-    if (disjuncts.length === 0) return null;
-    this.buildGraph();
-    // group disjuncts by tableau formula
-    interface PEM { aeState: LE[]; aeAction: LE[]; ea: LE[] }
-    const groups = new Map<string, { tf: LE; pems: PEM[] }>();
     for (const d of disjuncts) {
-      const pem: PEM = { aeState: [], aeAction: [], ea: [] };
+      const pem = { aeState: [] as LE[], aeAction: [] as LE[], ea: [] as LE[] };
       const tfs: LE[] = [];
       for (const c of d) {
         if (c.t === 'always' && c.a!.t === 'eventually' && c.a!.a!.lvl <= 2) {
@@ -262,6 +266,14 @@ export class Liveness {
       if (!g) { g = { tf, pems: [] }; groups.set(k, g); }
       g.pems.push(pem);
     }
+    return groups.size;
+  }
+
+  check(): CheckResult | null {
+    if (!this.groups) this.prepare();
+    const groups = this.groups!;
+    if (groups.size === 0) return null;
+    this.buildGraph();
     for (const g of groups.values()) {
       const r = this.checkGroup(g.tf, g.pems);
       if (r) return r;
@@ -583,16 +595,31 @@ export class Liveness {
 export function modelCheck(model: Model, opts: CheckOptions): { result: CheckResult; checker: Checker } {
   const needLive = model.liveProps.length > 0;
   const checker = new Checker(model, { ...opts, recordGraph: opts.recordGraph || needLive });
+  if (needLive && (model.view || model.symmetry)) checker.succState = [];
   opts.onChecker?.(checker);
-  let result = checker.run();
-  if (result.status === 'ok' && needLive) {
+  const live = new Liveness(model, checker);
+  let branches = 0;
+  if (needLive) {
     try {
-      const r = new Liveness(model, checker).check();
-      if (r) { r.outdegree = result.outdegree; result = r; }
+      branches = live.prepare();
+    } catch (e) {
+      if (!(e instanceof TlaError)) throw e;
+      return { result: checker.result('error', { message: e.message, printSummary: false }), checker };
+    }
+    opts.onLiveness?.('branches', branches);
+  }
+  let result = checker.run();
+  if (result.status === 'ok' && branches > 0) {
+    opts.onLiveness?.('start', branches);
+    try {
+      const r = live.check();
+      if (r) result = r;
     } catch (e) {
       if (!(e instanceof TlaError)) throw e;
       result = checker.result('error', { message: checker.describeErr(e) });
     }
+    if (result.status === 'ok') opts.onLiveness?.('end', branches);
   }
+  result.liveBranches = branches;
   return { result, checker };
 }

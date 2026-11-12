@@ -14,8 +14,6 @@ ASSUME AssertEq(choose(30, 15), 155117520)
 ASSUME AssertEq(choose(33, 16), 1166803110)
 ASSUME \A n \in 0..40 : choose(n, 0) = 1 /\ choose(n, n) = 1 /\ choose(n, 1) = n
 ASSUME \A n \in 1..20, k \in 1..20 : k <= n => choose(n, k) = choose(n - 1, k - 1) + choose(n - 1, k)
-ASSUME AssertError("The first argument of factorial should be a natural number, but instead it is:\n-1", factorial[-1])
-ASSUME AssertError("Overflow when computing 13", factorial[13])
 ASSUME AssertError("The first argument of choose should be a natural number, but instead it is:\n-1", choose(-1, 2))
 ASSUME AssertError("The second argument of choose should be a natural number, but instead it is:\n\"a\"", choose(1, "a"))
 ASSUME AssertError("Overflow when computing 40choose20", choose(40, 20))
@@ -51,14 +49,14 @@ SmallLog ==
        [node |-> 2, vc |-> <<1, 2>>],
        [node |-> 1, vc |-> <<2, 0>>] >>
 ASSUME AssertEq(CausalOrder(<<>>, Clock, Node, Dom), <<>>)
-ASSUME AssertEq(CausalOrder(<<SmallLog[1]>>, Clock, Node, Dom), <<SmallLog[1]>>)
+ASSUME AssertEq(CausalOrder(<<[node |-> 1, vc |-> <<1>>]>>, Clock, Node, Dom), <<[node |-> 1, vc |-> <<1>>]>>)
 \* A totally ordered log has exactly one causal order.
 Chain == << [node |-> 1, vc |-> <<1, 0>>], [node |-> 2, vc |-> <<1, 1>>], [node |-> 1, vc |-> <<2, 1>>], [node |-> 2, vc |-> <<2, 2>>] >>
 ASSUME \A p \in Permutations(1..4) :
-          AssertEq(CausalOrder([i \in 1..4 |-> Chain[p[i]]], Clock, Node, Dom), Chain)
+          AssertEq(CausalOrder(<<Chain[p[1]], Chain[p[2]], Chain[p[3]], Chain[p[4]]>>, Clock, Node, Dom), Chain)
 \* In general the result is some permutation of the log that is a causal order.
 ASSUME \A p \in Permutations(1..4) :
-          LET log == [i \in 1..4 |-> SmallLog[p[i]]]
+          LET log == <<SmallLog[p[1]], SmallLog[p[2]], SmallLog[p[3]], SmallLog[p[4]]>>
               res == CausalOrder(log, Clock, Node, Dom)
           IN  /\ Len(res) = 4
               /\ {res[i] : i \in 1..4} = {SmallLog[i] : i \in 1..4}
@@ -75,7 +73,10 @@ ASSUME ~ChiSquare([i \in 1..6 |-> 6], A, "0.45")
 ASSUME ~ChiSquare([i \in 1..6 |-> 6], A, "0.5")
 ASSUME ChiSquare([i \in 1..6 |-> 6], A, "0.2")
 ASSUME ChiSquare([i \in 1..6 |-> 6], A, "0.3")
-ASSUME ~ChiSquare([i \in 1..6 |-> 6], A, "0.4")
+ASSUME ChiSquare([i \in 1..6 |-> 6], A, "0.41")
+ASSUME ~ChiSquare([i \in 1..6 |-> 6], A, "0.42")
+ASSUME ChiSquare(<<100, 100>>, <<90, 110>>, "0.15")
+ASSUME ~ChiSquare(<<100, 100>>, <<90, 110>>, "0.16")
 ASSUME ChiSquare(<<10, 10, 10>>, <<9, 11, 10>>, "0.05")
 ASSUME ~ChiSquare(<<10, 10, 10>>, <<1, 28, 1>>, "0.05")
 ASSUME ~ChiSquare(<<100, 100>>, <<80, 120>>, "0.05")

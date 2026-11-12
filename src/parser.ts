@@ -664,7 +664,8 @@ class Parser {
     let sel: any[] | null = null;
     while (this.isOp('!')) {
       const n1 = this.peekAt(1);
-      if (!sel && (n1.t === 'id' || (n1.t === 'op' && INFIX[n1.v] !== undefined && n1.v !== '<' && n1.v !== ':>'))) {
+      const n2 = this.peekAt(2);
+      if (!sel && (n1.t === 'id' || (n1.t === 'op' && INFIX[n1.v] !== undefined && ((n1.v !== '<' && n1.v !== ':>') || (n2.t === 'op' && n2.v === '(')))) && !(n1.t === 'op' && n1.v === '<<')) {
         this.next();
         const part = this.next();
         name += '!' + part.v;

@@ -58,8 +58,7 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
     }
   }
   const ev = new Evaluator();
-  // TLC orders (and prints) variables by name
-  const vars = root.vars.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const vars = tlcVariableOrder(root);
   vars.forEach((v, i) => { v.idx = i; });
   ev.nvars = vars.length;
   ev.varNames = vars.map(v => v.name);
@@ -69,8 +68,8 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
   const getDef = (name: string, what: string): Def => {
     const s = root.syms.get(name);
     if (!s) throw new ConfigError(`The ${what} ${name} specified in the configuration file\nis not defined in the specification.`);
-    if (s.k !== 'def') throw new ConfigError(`The ${what} ${name} specified in the configuration file\nis not a defined operator.`);
-    return s;
+    if (s.k === 'var') throw new ConfigError(`The ${what} ${name} specified in the configuration file\nis not a defined operator.`);
+    return s as Def;
   };
 
   // ---- constants ----
@@ -110,8 +109,8 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
   // ---- invariants / constraints ----
   for (const n of cfg.invariants) {
     const d = getDef(n, 'invariant');
-    if (d.params.length) throw new ConfigError(`The invariant ${n} cannot take arguments.`);
-    if (defLevel(d) >= 2) throw new ConfigError(`The invariant ${n} is not a state predicate (it has primed variables or temporal operators).`);
+    if (d.k === 'def' && d.params.length) throw new ConfigError(`The invariant ${n} cannot take arguments.`);
+    if (d.k === 'def' && defLevel(d) >= 2) throw new ConfigError(`The invariant ${n} is not a state predicate (it has primed variables or temporal operators).`);
     model.invariants.push({ name: n, e: mkApp(n, d), ctx: null });
   }
   for (const n of cfg.constraints) model.constraints.push({ name: n, e: mkApp(n, getDef(n, 'constraint')), ctx: null });
@@ -348,4 +347,28 @@ export function exprLevel(ev: Evaluator, e: Node, ctx: Ctx | null): number {
     return l;
   };
   return go(e, ctx);
+}
+
+// TLC lists variables in the iteration order of SANY's symbol Hashtable for the root module, so the
+// order depends on Java's String.hashCode of each name and on the table capacity, which in turn
+// depends on how many symbols the module context holds. Reproduced here so that printed states match.
+const STD_SYMBOLS: Record<string, number> = {
+  Naturals: 12, Integers: 2, Reals: 3, Sequences: 8, FiniteSets: 2, TLC: 14, Bags: 12, TLCExt: 14, Randomization: 4,
+};
+function javaHash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return h & 0x7fffffff;
+}
+export function tlcVariableOrder(root: ModuleInfo): Decl[] {
+  let count = 72; // built-in operators in SANY's initial context
+  const std = new Set<string>();
+  for (const sym of new Set(root.syms.values())) {
+    if (sym.k === 'def' && sym.builtin && STD_SYMBOLS[sym.module] !== undefined) std.add(sym.module);
+    else count++;
+  }
+  for (const m of std) count += STD_SYMBOLS[m];
+  let cap = 11;
+  while (count > Math.floor(cap * 0.75)) cap = cap * 2 + 1;
+  return root.vars.map((v, i) => ({ v, b: javaHash(v.name) % cap, i })).sort((x, y) => x.b - y.b || x.i - y.i).map(x => x.v);
 }

@@ -19,6 +19,9 @@ export interface CheckResult {
   loopTo?: number; // liveness: index (0-based) of the state the lasso returns to; -1 = stuttering
   loopAction?: Action | null;
   errorLoc?: string;
+  liveBranches?: number;
+  callStack?: string; // TLC-style list of nested expression positions for evaluation errors
+  code?: number; // TLC message code for `message`, when it is not a generic error
   generated: number;
   distinct: number;
   queue: number;
@@ -34,6 +37,7 @@ export interface CheckOptions {
   onProgress?: (generated: number, distinct: number, queue: number) => void;
   maxDepth?: number;
   onChecker?: (c: Checker) => void;
+  onLiveness?: (phase: 'branches' | 'start' | 'end', branches: number) => void;
 }
 
 // Open-addressing hash set of 64-bit fingerprints (two int32 halves) mapping to state ids.
@@ -97,6 +101,7 @@ export class Checker {
   act: number[] = [];
   succ: number[][] = []; // recorded graph: successor ids per state (if recordGraph)
   succAct: number[][] = [];
+  succState: State[][] | null = null; // actual successor states per edge (only with VIEW/SYMMETRY + liveness)
   inits: number[] = [];
   fps = new FpSet();
   hasher = new Hasher();
@@ -131,7 +136,7 @@ export class Checker {
       case 'stats': return makeRecord(['distinct', 'generated', 'queue', 'diameter', 'duration'],
         [this.states.length, this.generated, this.states.length - this.head, this.depth, 0]);
     }
-    if (k.startsWith('-D')) return 'FALSE';
+    if (k.startsWith('-D')) return k.endsWith('.cdot') ? 'true' : 'false';
     return undefined;
   }
 
@@ -190,6 +195,28 @@ export class Checker {
     return ev.evalBool(p.e, p.ctx);
   }
 
+  // Re-run a failing evaluation while recording the chain of nested expressions being evaluated.
+  nestedExpressions(p: Pred, s: State, t: State | null): string {
+    const ev = this.ev as any;
+    const stack: any[] = [];
+    const proto = Object.getPrototypeOf(ev);
+    ev.eval = function (n: any, ctx: any) {
+      stack.push(n);
+      const v = proto.eval.call(this, n, ctx);
+      stack.pop();
+      return v;
+    };
+    try { this.evalPred(p, s, t); } catch { /* expected */ } finally { delete ev.eval; }
+    const lines: string[] = [];
+    let last: any = null;
+    for (const n of stack) {
+      if (n === p.e || n === last || !n.loc || n.loc[0] === 0 || n.k === 'num' || n.k === 'str') continue;
+      last = n;
+      lines.push(`${lines.length}. Line ${n.loc[0]}, column ${n.loc[1]} to line ${n.loc[2]}, column ${n.loc[3]} in ${n.mod ?? this.model.rootName}`);
+    }
+    return lines.length ? lines.join('\n') + '\n' : '    The error call stack is empty.\n';
+  }
+
   checkAssumptions(): CheckResult | null {
     const ev = this.ev;
     for (const a of this.model.root.assumes) {
@@ -207,11 +234,11 @@ export class Checker {
     return null;
   }
 
-  describeErr(e: unknown): string {
+  describeErr(e: unknown, withLoc = true): string {
     if (e instanceof RangeError) return 'Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.';
     if (e instanceof TlaError) {
       let m = e.message;
-      if (e.loc && e.loc[0] > 0) m += `\n(evaluating the expression at line ${e.loc[0]}, col ${e.loc[1]} to line ${e.loc[2]}, col ${e.loc[3]} of module ${e.module ?? '?'})`;
+      if (withLoc && e.loc && e.loc[0] > 0) m += `\n(evaluating the expression at line ${e.loc[0]}, col ${e.loc[1]} to line ${e.loc[2]}, col ${e.loc[3]} of module ${e.module ?? '?'})`;
       return m;
     }
     throw e;
@@ -270,7 +297,7 @@ export class Checker {
         for (const inv of m.invariants) {
           let ok: boolean;
           try { ok = this.evalPred(inv, s, null); } catch (e) {
-            return this.result('error', { message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e)}`, trace: [{ state: s, action: null, id: -1 }] });
+            return this.result('error', { code: 2111, message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e)}`, trace: [{ state: s, action: null, id: -1 }] });
           }
           if (!ok) return this.result('invariant-init', { name: inv.name, trace: [{ state: s, action: null, id }], printSummary: false });
         }
@@ -332,6 +359,7 @@ export class Checker {
         if (e instanceof CheckError) { e.result.trace = this.traceTo(sid); e.result.queue = this.states.length - this.head; return e.result; }
         return this.result('error', { message: this.describeErr(e), trace: this.traceTo(sid) });
       }
+      if (this.ev.extraGenerated) { this.generated += this.ev.extraGenerated; this.ev.extraGenerated = 0; }
       let fresh = 0;
       for (let i = 0; i < succs.length; i++) {
         const t = succs[i];
@@ -351,7 +379,10 @@ export class Checker {
               if (this.level[sid] + 1 > this.depth) this.depth = this.level[sid] + 1;
               fresh++;
             } else { unseen = false; id = ex; }
-            if (record) { this.succ[sid].push(id); this.succAct[sid].push(succAct[i]); }
+            if (record) {
+              this.succ[sid].push(id); this.succAct[sid].push(succAct[i]);
+              if (this.succState) (this.succState[sid] ??= []).push(t);
+            }
           }
         } catch (e) {
           return this.result('error', { message: this.describeErr(e), trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id: -1 }] });
@@ -360,7 +391,9 @@ export class Checker {
           for (const inv of m.invariants) {
             let ok: boolean;
             try { ok = this.evalPred(inv, t, null); } catch (e) {
-              return this.result('error', { message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e)}`, trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id }] });
+              return this.result('error', { code: 2111, message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e, false)}`,
+                callStack: inModel ? undefined : this.nestedExpressions(inv, t, null),
+                trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id }] });
             }
             if (!ok) {
               const r = this.result('invariant', { name: inv.name, trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id }] });
