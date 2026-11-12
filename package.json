@@ -4,16 +4,51 @@
   "description": "A TLA+ model checker (TLC-compatible) written in pure TypeScript. No Java.",
   "type": "module",
   "license": "MIT",
-  "bin": { "verify": "dist/cli.js", "tlc": "dist/cli.js" },
+  "bin": {
+    "verify": "dist/cli.js",
+    "verify-java": "dist/java.js",
+    "verify.js": "dist/cli.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "files": ["dist", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CONFORMANCE.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p .",
-    "test": "node --test test/*.test.ts",
-    "conformance": "node scripts/conformance.ts"
+    "bundle": "node scripts/bundle.mjs",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "conformance:examples": "node scripts/conformance.mjs",
+    "conformance:tlc": "node scripts/diff-tlc.mjs",
+    "conformance:statechart": "node scripts/statechart-corpus.mjs",
+    "prepublishOnly": "npm run build"
   },
-  "devDependencies": { "typescript": "^5.8.0", "@types/node": "^22.0.0" }
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "@types/node": "^22.0.0"
+  },
+  "keywords": [
+    "tla+",
+    "tlaplus",
+    "tlc",
+    "model-checker",
+    "formal-verification",
+    "formal-methods"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattzcarey/verify.js.git"
+  }
 }
