@@ -1,7 +1,7 @@
 // Command-line driver (TLC-compatible flags).
 import { parseConfig } from './cfg.ts';
 import { buildModel } from './model.ts';
-import { Checker } from './checker.ts';
+import { modelCheck } from './liveness.ts';
 import type { CheckResult } from './checker.ts';
 import { BUNDLED } from './bundled.ts';
 import { TlaError } from './lexer.ts';
@@ -40,11 +40,10 @@ export function runCli(argv: string[], host: Host): void {
   try {
     const cfg = parseConfig(host.fs.readFileSync(cfgPath, 'utf8'));
     const model = buildModel(rootName, resolve, cfg, { print: s => host.stdout(s + '\n') });
-    const checker = new Checker(model, { checkDeadlock: deadlock && model.checkDeadlock });
-    res = checker.run();
+    res = modelCheck(model, { checkDeadlock: deadlock && model.checkDeadlock }).result;
     if (json) {
       host.stdout(JSON.stringify({ status: res.status, name: res.name, message: res.message, generated: res.generated, distinct: res.distinct, queue: res.queue, depth: res.depth,
-        trace: res.trace?.map(t => ({ action: t.action?.name ?? null, state: Object.fromEntries(model.vars.map((v, i) => [v.name, fmt(t.state[i])])) })) }) + '\n');
+        loopTo: res.loopTo, trace: res.trace?.map(t => ({ action: t.action?.name ?? null, state: Object.fromEntries(model.vars.map((v, i) => [v.name, fmt(t.state[i])])) })) }) + '\n');
     } else {
       host.stdout(`${res.status}${res.name ? ' ' + res.name : ''}${res.message ? ': ' + res.message : ''}\n`);
       for (const t of res.trace ?? []) host.stdout(`  ${t.action?.name ?? 'Init'}: ` + model.vars.map((v, i) => `${v.name}=${fmt(t.state[i])}`).join(' ') + '\n');

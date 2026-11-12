@@ -153,6 +153,8 @@ export class Evaluator {
   hooks: { [k: string]: any } = { random: Math.random };
   callDepth = 0;
   nAssigned = 0; // number of target variables assigned during enumeration
+  inEnabled = 0;
+  scratch = new Map<Decl, number>(); // ENABLED: primed variables of instantiated modules are existentially bound
 
   fail(msg: string, n?: Node): never {
     const e = new EvalError(msg);
@@ -365,6 +367,13 @@ export class Evaluator {
     if (base !== null) {
       const b = this.envLookup(base, n.name);
       if (b !== undefined) {
+        if (this.inEnabled > 0 && this.primeDepth > 0 && r.k === 'var' && b instanceof Lazy) {
+          const idx = this.asVar(n, ctx);
+          const v = this.cur[idx];
+          this.prTouch++;
+          if (v === undefined) return this.fail(`In evaluation, the identifier ${r.name} is either undefined or an operator.`, n);
+          return v;
+        }
         if (b instanceof Lazy) return this.force(b);
         if (b instanceof Closure || b instanceof DefRef) return this.applyOp(b, n.args.map((a: Node) => this.mkArg(a, ctx)));
         return b;
@@ -790,7 +799,8 @@ export class Evaluator {
     const sn = this.nxt, im = this.initMode, na = this.nAssigned, cd = this.callDepth;
     this.nxt = new Array(this.nvars);
     this.initMode = false;
-    this.nAssigned = this.nvars === 0 ? -1 : 0;
+    this.nAssigned = -1e9; // no all-assigned shortcut inside ENABLED
+    this.inEnabled++;
     try {
       this.enumerate(a, ctx, () => { throw FOUND; });
       return false;
@@ -798,7 +808,7 @@ export class Evaluator {
       if (e === FOUND) return true;
       throw e;
     } finally {
-      this.nxt = sn; this.initMode = im; this.nAssigned = na; this.callDepth = cd;
+      this.nxt = sn; this.initMode = im; this.nAssigned = na; this.callDepth = cd; this.inEnabled--;
     }
   }
 
@@ -817,12 +827,27 @@ export class Evaluator {
       const base = ctx === null ? null : ctx.base;
       if (base !== null) {
         const b = this.envLookup(base, e.name);
-        if (b instanceof Lazy) { e = b.e; ctx = b.ctx; continue; }
+        if (b instanceof Lazy) {
+          if (this.inEnabled > 0) {
+            const real = this.asVarPlain(b.e, b.ctx);
+            if (real >= 0) return real;
+            let si = this.scratch.get(r);
+            if (si === undefined) { si = this.nvars + this.scratch.size; this.scratch.set(r, si); }
+            return si;
+          }
+          e = b.e; ctx = b.ctx; continue;
+        }
         if (b !== undefined) return -1;
       }
       return (r as Decl).idx;
     }
     return -1;
+  }
+
+  asVarPlain(e: Node, ctx: Ctx | null): number {
+    const save = this.inEnabled;
+    this.inEnabled = 0;
+    try { return this.asVar(e, ctx); } finally { this.inEnabled = save; }
   }
 
   // Enumerate all ways of satisfying `e`, assigning unassigned target variables (primed variables in
@@ -976,13 +1001,13 @@ export class Evaluator {
       const idx = this.asVar(e, ctx);
       if (idx >= 0) {
         if (nxt[idx] === undefined) {
-          const v = this.cur[idx];
+          const v = idx >= this.nvars ? this.eval(e, ctx) : this.cur[idx];
           this.stTouch++;
           if (v === undefined) this.fail(`In evaluation, the identifier ${this.varNames[idx]} is either undefined or an operator.`, e);
           nxt[idx] = v;
           this.nAssigned++;
           try { k(); } finally { nxt[idx] = undefined; this.nAssigned--; }
-        } else if (valEq(nxt[idx], this.cur[idx])) k();
+        } else if (valEq(nxt[idx], idx >= this.nvars ? this.eval(e, ctx) : this.cur[idx])) k();
         return;
       }
       const x = this.expandApp(e, ctx);
