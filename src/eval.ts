@@ -1,6 +1,6 @@
 // Expression evaluator and action (next-state / initial-state) enumerator.
 import type { Node, Bound, Param } from './parser.ts';
-import { LOCAL } from './modules.ts';
+import { LOCAL, tailFn, defLevel } from './modules.ts';
 import type { Def, Decl } from './modules.ts';
 import {
   EvalError, SetBase, SetV, IntervalV, SubsetV, DerivedSetV, FcnSetV, RecSetV, CrossV, LazySetV, TupleV, RecordV, FcnV,
@@ -97,7 +97,8 @@ export class LazyFcn {
     g.over = this.over ? [...this.over, [key, val]] : [[key, val]];
     return g;
   }
-  apply(arg: Value): Value {
+  // `lazy`: the caller keeps a function-valued result unevaluated (it is applied right away)
+  apply(arg: Value, lazy = false): Value {
     if (this.over !== null) {
       for (let i = this.over.length - 1; i >= 0; i--) if (valEq(this.over[i][0], arg)) return this.over[i][1];
     }
@@ -107,7 +108,8 @@ export class LazyFcn {
     if (hit !== undefined) return hit;
     const c = this.bind(arg);
     const s0 = ev.stTouch, p0 = ev.prTouch;
-    const v = ev.eval(this.node.body, c);
+    // like TLC, the body of a recursive function is evaluated in keep-lazy mode
+    const v = lazy || this.node.isRec ? ev.evalLazy(this.node.body, c) : ev.eval(this.node.body, c);
     if (ev.stTouch === s0 && ev.prTouch === p0) this.memo.set(key, v);
     return v;
   }
@@ -128,7 +130,7 @@ export class LazyFcn {
     const ds = this.domain();
     if (!ds.enumerable()) return this; // stays lazy: only application and EXCEPT are possible
     const dom = ds.elems();
-    const vals = dom.map(d => this.apply(d));
+    const vals = dom.map(d => { const v = this.apply(d); return typeof v === 'object' && v instanceof LazyFcn ? v.force() : v; });
     const f = makeFcn(dom, vals);
     if (ev.stTouch === s0 && ev.prTouch === p0) this.forced = f;
     return f;
@@ -197,13 +199,13 @@ export class Evaluator {
     return c;
   }
 
-  force(lz: Lazy): Value {
+  force(lz: Lazy, lazy = false): Value {
     if (lz.v !== undefined) {
       if (lz.st === ANY) return lz.v;
       if (lz.st === this.cur && !this.initMode && this.primeDepth === 0) { this.stTouch++; return lz.v; }
     }
     const s0 = this.stTouch, p0 = this.prTouch;
-    const v = this.eval(lz.e, lz.ctx);
+    const v = lazy ? this.evalLazy(lz.e, lz.ctx) : this.eval(lz.e, lz.ctx);
     if (this.prTouch === p0) {
       if (this.stTouch === s0) { lz.v = v; lz.st = ANY; }
       else if (!this.initMode && this.primeDepth === 0) { lz.v = v; lz.st = this.cur; }
@@ -235,7 +237,10 @@ export class Evaluator {
   }
 
   unthunk(t: any): Value {
-    if (t instanceof Lazy) return this.force(t);
+    if (t instanceof Lazy) {
+      const v = this.force(t);
+      return typeof v === 'object' && v instanceof LazyFcn ? v.force() : v;
+    }
     return t;
   }
 
@@ -568,7 +573,7 @@ export class Evaluator {
         return mkSet(all);
       }
       case O_domain: {
-        const f = n.a[0].k === 'app' ? this.evalApp(n.a[0], ctx) : this.eval(n.a[0], ctx);
+        const f = tailFn(n.a[0]) ? this.evalLazy(n.a[0], ctx) : n.a[0].k === 'app' ? this.evalApp(n.a[0], ctx) : this.eval(n.a[0], ctx);
         if (f instanceof LazyFcn) return f.domain();
         const d = domainOf(f);
         if (d === null) return this.fail(`Attempted to apply the operator DOMAIN to the non-function value\n${fmt(f)}`, n);
@@ -685,11 +690,15 @@ export class Evaluator {
       }
       case O_fnapp: {
         const fn = n.f;
-        const f = fn.k === 'app' ? this.evalApp(fn, ctx) : this.eval(fn, ctx);
+        let tf = fn.tf;
+        if (tf === undefined) tf = tailFn(fn);
+        const f = tf ? this.evalLazy(fn, ctx) : fn.k === 'app' ? this.evalApp(fn, ctx) : this.eval(fn, ctx);
         let arg: Value;
         if (n.args.length === 1) arg = this.eval(n.args[0], ctx);
         else arg = new TupleV(n.args.map((a: Node) => this.eval(a, ctx)));
-        return this.applyFcn(f, arg, n);
+        const v = this.applyFcn(f, arg, n);
+        if (typeof v === 'object' && v instanceof LazyFcn) return v.force();
+        return v;
       }
       case O_dot: {
         const r = this.eval(n.e, ctx);
@@ -718,6 +727,55 @@ export class Evaluator {
       return this.fail('TLC attempted to evaluate a temporal formula where a state or action-level expression was expected.', n);
     }
     return this.fail(`TLC does not support the construct '${n.k}' here.`, n);
+  }
+
+  // Evaluate in TLC's "keep lazy" mode: a function constructor reached through IF/CASE/LET/definitions is
+  // returned as an unevaluated LazyFcn (the caller applies it, takes its DOMAIN or enumerates its body).
+  evalLazy(n: Node, ctx: Ctx | null): Value {
+    switch (n.k) {
+      case 'fndef': return new LazyFcn(n, ctx, this);
+      case 'if': return this.evalBool(n.a[0], ctx) ? this.evalLazy(n.a[1], ctx) : this.evalLazy(n.a[2], ctx);
+      case 'case': {
+        for (const arm of n.arms) if (this.evalBool(arm.c, ctx)) return this.evalLazy(arm.e, ctx);
+        if (n.other) return this.evalLazy(n.other, ctx);
+        return this.fail('Attempted to evaluate a CASE expression in which none of the conditions were true.', n);
+      }
+      case 'let': return this.evalLazy(n.body, this.bindLet(n.defs, ctx));
+      case 'fnapp': {
+        if (!tailFn(n)) break;
+        const f = this.evalLazy(n.f, ctx);
+        const arg = n.args.length === 1 ? this.eval(n.args[0], ctx) : new TupleV(n.args.map((a: Node) => this.eval(a, ctx)));
+        return f instanceof LazyFcn ? f.apply(arg, true) : this.applyFcn(f, arg, n);
+      }
+      case 'app': {
+        if (!tailFn(n)) return this.evalApp(n, ctx);
+        const r = n.r as any;
+        if (r === LOCAL) {
+          const b = this.lookup(ctx, n.name);
+          return b instanceof Lazy ? this.force(b, true) : this.evalApp(n, ctx);
+        }
+        let def: Def = r.override ?? r;
+        if (def.builtin) break;
+        const top = def.params.length === 0 && !def.inst && (ctx === null || ctx.base === null);
+        if (top && def.cached) return def.cache;
+        const x = this.expandApp(n, ctx);
+        if (!x) break;
+        const s0 = this.stTouch, p0 = this.prTouch;
+        const v = this.evalLazy(x.body, x.ctx);
+        if (top && defLevel(def) === 0 && this.stTouch === s0 && this.prTouch === p0) {
+          // a constant: evaluate it completely once (TLC precomputes constant definitions), unless that fails
+          let w = v;
+          if (v instanceof LazyFcn) {
+            try { w = v.force(); } catch (e) { if (!(e instanceof TlaError)) throw e; }
+            if (this.stTouch !== s0 || this.prTouch !== p0) return v;
+          }
+          def.cached = true; def.cache = w;
+          return w;
+        }
+        return v;
+      }
+    }
+    return this.eval(n, ctx);
   }
 
   mkRecord(_n: Node, names: string[], vals: Value[]): Value {
@@ -887,6 +945,11 @@ export class Evaluator {
         if (b instanceof Lazy) { e = b.e; ctx = b.ctx; continue; }
         return -1;
       }
+      if (r.k === 'def') {
+        const x = this.expandApp(e, ctx);
+        if (!x) return -1;
+        e = x.body; ctx = x.ctx; continue;
+      }
       if (r.k !== 'var') return -1;
       const base = ctx === null ? null : ctx.base;
       if (base !== null) {
@@ -1032,7 +1095,7 @@ export class Evaluator {
         break;
       case 'fnapp': {
         // TLC enters the body of a lazily evaluated (recursive) function
-        const f = e.f.k === 'app' ? this.evalApp(e.f, ctx) : this.eval(e.f, ctx);
+        const f = tailFn(e.f) ? this.evalLazy(e.f, ctx) : e.f.k === 'app' ? this.evalApp(e.f, ctx) : this.eval(e.f, ctx);
         if (f instanceof LazyFcn) {
           const arg = e.args.length === 1 ? this.eval(e.args[0], ctx) : new TupleV(e.args.map((a: Node) => this.eval(a, ctx)));
           this.enumerate(f.node.body, f.bind(arg), k);
@@ -1067,10 +1130,17 @@ export class Evaluator {
     if (this.initMode) return lhs.k === 'app' ? this.asVar(lhs, ctx) : -1;
     if (this.nxt === null || this.primeDepth > 0) return -1;
     // look through operator parameters bound to primed variables, e.g. Send(p, d, mem, mem')
-    for (let guard = 0; lhs.k === 'app' && lhs.r === LOCAL && lhs.args.length === 0 && guard < 100; guard++) {
-      const b = this.lookup(ctx, lhs.name);
-      if (!(b instanceof Lazy)) return -1;
-      lhs = b.e; ctx = b.ctx;
+    for (let guard = 0; lhs.k === 'app' && lhs.args.length === 0 && guard < 100; guard++) {
+      if (lhs.r === LOCAL) {
+        const b = this.lookup(ctx, lhs.name);
+        if (!(b instanceof Lazy)) return -1;
+        lhs = b.e; ctx = b.ctx;
+      } else if (lhs.r.k === 'def' && !lhs.sel) {
+        // a definition whose body is a primed variable (a == x')
+        const x = this.expandApp(lhs, ctx);
+        if (!x) return -1;
+        lhs = x.body; ctx = x.ctx;
+      } else return -1;
     }
     if (lhs.k !== 'prime') return -1;
     return this.asVar(lhs.a[0], ctx);
