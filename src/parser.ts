@@ -498,10 +498,32 @@ class Parser {
       if (n.t === 'op' && (n.v === ',' || n.v === ')') || n.t === 'eof' || n.t === 'end' || n.t === 'sep' ||
         (n.t === 'kw' && UNIT_START_KW.has(n.v))) {
         this.next();
-        return this.node('app', t, { name: t.v, args: [] });
+        return this.opRef(t);
       }
     }
     return this.parseExpr();
+  }
+
+  // A bare operator symbol used as an operator argument. Built-in (non-definable) operators become LAMBDAs.
+  opRef(t: Tok): Node {
+    const fixed = FIXED[t.v];
+    if (!fixed) return this.node('app', t, { name: t.v, args: [] });
+    const loc: Loc = [t.line, t.col, t.line, t.ec];
+    const arg = (name: string): Node => ({ k: 'app', loc, name, args: [] });
+    if (PREFIX[t.v] || t.v === "'") return { k: 'lambda', loc, params: [{ name: '_a', arity: 0 }], body: { k: fixed, loc, a: [arg('_a')] } };
+    return { k: 'lambda', loc, params: [{ name: '_a', arity: 0 }, { name: '_b', arity: 0 }], body: { k: fixed, loc, a: [arg('_a'), arg('_b')] } };
+  }
+
+  // Non-fix application of an infix/postfix operator symbol: +(a, b), \in(x, S), ^+(a), -.(a)
+  prefixApply(t: Tok): Node {
+    this.next();
+    this.next();
+    const args = this.parseArgs();
+    const fixed = FIXED[t.v];
+    const want = POSTFIX.has(t.v) || t.v === '-.' ? 1 : 2;
+    if (args.length !== want) this.fail(`The operator ${t.v} requires ${want} arguments`);
+    if (fixed) return this.node(fixed, t, { a: args });
+    return this.node('app', t, { name: t.v, args });
   }
 
   parseArgs(): Node[] {
@@ -628,6 +650,10 @@ class Parser {
       }
       case '@': this.next(); return this.node('at', t);
     }
+    {
+      const n1 = this.peekAt(1);
+      if ((INFIX[t.v] || POSTFIX.has(t.v) || t.v === '-.') && t.v !== '-' && n1.t === 'op' && n1.v === '(') return this.prefixApply(t);
+    }
     this.fail('Expected expression');
   }
 
@@ -665,7 +691,8 @@ class Parser {
     while (this.isOp('!')) {
       const n1 = this.peekAt(1);
       const n2 = this.peekAt(2);
-      if (!sel && (n1.t === 'id' || (n1.t === 'op' && INFIX[n1.v] !== undefined && ((n1.v !== '<' && n1.v !== ':>') || (n2.t === 'op' && n2.v === '(')))) && !(n1.t === 'op' && n1.v === '<<')) {
+      if (!sel && (n1.t === 'id' || (n1.t === 'op' && INFIX[n1.v] !== undefined && ((n1.v !== '<' && n1.v !== ':>') || (n2.t === 'op' && n2.v === '('))) ||
+        (n1.t === 'op' && (n1.v === '-.' || (POSTFIX.has(n1.v) && n1.v !== "'")) && n2.t === 'op' && n2.v === '(')) && !(n1.t === 'op' && n1.v === '<<')) {
         this.next();
         const part = this.next();
         name += '!' + part.v;
