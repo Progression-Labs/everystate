@@ -3,7 +3,7 @@ import type { Node, Bound, Param } from './parser.ts';
 import { LOCAL } from './modules.ts';
 import type { Def, Decl } from './modules.ts';
 import {
-  EvalError, SetBase, SetV, IntervalV, SubsetV, FcnSetV, RecSetV, CrossV, LazySetV, TupleV, RecordV, FcnV,
+  EvalError, SetBase, SetV, IntervalV, SubsetV, DerivedSetV, FcnSetV, RecSetV, CrossV, LazySetV, TupleV, RecordV, FcnV,
   ModelValue, valEq, compare, bsearch, sortDedup, mkSet, makeFcn, makeRecord, domainOf, fmt, strId, EMPTY_SET,
 } from './values.ts';
 import type { Value } from './values.ts';
@@ -137,6 +137,8 @@ const O_num = O.num, O_str = O.str, O_bool = O.bool, O_app = O.app, O_and = O.an
   O_setfilter = O.setfilter, O_setmap = O.setmap, O_fndef = O.fndef, O_fnset = O.fnset, O_rec = O.rec,
   O_recset = O.recset, O_except = O.except, O_tuple = O.tuple, O_fnapp = O.fnapp, O_dot = O.dot,
   O_boxact = O.boxact, O_angleact = O.angleact, O_lambda = O.lambda, O_at = O.at;
+
+const reducible = (s: SetBase) => s instanceof SetV || s instanceof IntervalV;
 
 class Found extends Error {}
 const FOUND = new Found();
@@ -515,14 +517,14 @@ export class Evaluator {
       case O_cup: return this.setUnion(this.evalSet(n.a[0], ctx), this.evalSet(n.a[1], ctx));
       case O_cap: {
         const a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
-        if (a.enumerable()) return new SetV(a.elems().filter(x => b.contains(x)));
-        if (b.enumerable()) return new SetV(b.elems().filter(x => a.contains(x)));
-        return new LazySetV(`${fmt(a)} \\cap ${fmt(b)}`, v => a.contains(v) && b.contains(v));
+        if (reducible(a) && reducible(b)) return new SetV(a.elems().filter(x => b.contains(x)));
+        const gen = a.enumerable() ? () => a.elems().filter(x => b.contains(x)) : b.enumerable() ? () => b.elems().filter(x => a.contains(x)) : null;
+        return new DerivedSetV(`${fmt(a)} \\cap ${fmt(b)}`, v => a.contains(v) && b.contains(v), gen);
       }
       case O_diff: {
         const a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
-        if (a.enumerable()) return new SetV(a.elems().filter(x => !b.contains(x)));
-        return new LazySetV(`${fmt(a)} \\ ${fmt(b)}`, v => a.contains(v) && !b.contains(v));
+        if (reducible(a)) return new SetV(a.elems().filter(x => !b.contains(x)));
+        return new DerivedSetV(`${fmt(a)} \\ ${fmt(b)}`, v => a.contains(v) && !b.contains(v), a.enumerable() ? () => a.elems().filter(x => !b.contains(x)) : null);
       }
       case O_powerset: return new SubsetV(this.evalSet(n.a[0], ctx));
       case O_bigunion: {
@@ -597,9 +599,17 @@ export class Evaluator {
         const b = n.bound as Bound;
         const s = this.evalSet(b.set!, ctx);
         const pred = n.pred;
-        if (!s.enumerable()) {
-          return new LazySetV(`{x \\in ${fmt(s)} : ...}`, v => s.contains(v) &&
-            this.evalBool(pred, b.tuple ? this.bindTuple(b.tuple, v, ctx) : cons(b.names![0], v, ctx)));
+        if (!reducible(s)) {
+          const test = (v: Value) => this.evalBool(pred, b.tuple ? this.bindTuple(b.tuple, v, ctx) : cons(b.names![0], v, ctx));
+          // the predicate may depend on the state: capture it for later (lazy) evaluation
+          const sc = this.cur, sn = this.nxt;
+          const inState = <T>(f: () => T): T => {
+            const c0 = this.cur, n0 = this.nxt;
+            this.cur = sc; this.nxt = sn;
+            try { return f(); } finally { this.cur = c0; this.nxt = n0; }
+          };
+          return new DerivedSetV(`{x \\in ${fmt(s)} : ...}`, v => s.contains(v) && inState(() => test(v)),
+            s.enumerable() ? () => inState(() => s.elems().filter(test)) : null);
         }
         const es = s.elems();
         const out: Value[] = [];
@@ -687,7 +697,9 @@ export class Evaluator {
   }
 
   setUnion(a: SetBase, b: SetBase): SetBase {
-    if (!a.enumerable() || !b.enumerable()) return new LazySetV(`${fmt(a)} \\cup ${fmt(b)}`, v => a.contains(v) || b.contains(v));
+    if (!reducible(a) || !reducible(b)) {
+      return new DerivedSetV(`${fmt(a)} \\cup ${fmt(b)}`, v => a.contains(v) || b.contains(v), a.enumerable() && b.enumerable() ? () => a.elems().concat(b.elems()) : null);
+    }
     const x = a.elems(), y = b.elems();
     if (x.length === 0) return b;
     if (y.length === 0) return a;

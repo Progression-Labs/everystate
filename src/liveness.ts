@@ -583,6 +583,7 @@ export class Liveness {
 export function modelCheck(model: Model, opts: CheckOptions): { result: CheckResult; checker: Checker } {
   const needLive = model.liveProps.length > 0;
   const checker = new Checker(model, { ...opts, recordGraph: opts.recordGraph || needLive });
+  opts.onChecker?.(checker);
   let result = checker.run();
   if (result.status === 'ok' && needLive) {
     try {

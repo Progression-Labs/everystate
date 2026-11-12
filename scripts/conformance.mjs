@@ -21,8 +21,8 @@ for (const d of fs.readdirSync(path.join(root, 'specifications'))) {
     cases.push({ spec: path.join(root, mod.path), cfg: path.join(root, m.path), exp: m });
   }
 }
-const kind = s => ({ ok: 'success', invariant: 'safety failure', 'invariant-init': 'safety failure', 'action-property': 'safety failure',
-  'implied-init': 'safety failure', deadlock: 'deadlock failure', liveness: 'liveness failure', assumption: 'assumption failure' }[s] ?? s);
+const kind = s => ({ ok: 'success', invariant: 'safety failure', 'invariant-init': 'safety failure', 'action-property': 'liveness failure',
+  'implied-init': 'liveness failure', deadlock: 'deadlock failure', liveness: 'liveness failure', assumption: 'assumption failure' }[s] ?? s);
 const results = [];
 let next = 0;
 async function worker() {

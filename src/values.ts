@@ -246,6 +246,22 @@ export class LazySetV extends SetBase {
   elems(): Value[] { return err(`Attempted to enumerate a non-enumerable set (${this.desc}).`); }
 }
 
+// A set defined by a membership predicate plus an on-demand enumeration (TLC's lazy SetPred/SetCup/...).
+export class DerivedSetV extends SetBase {
+  desc: string;
+  pred: (v: Value) => boolean;
+  gen: (() => Value[]) | null;
+  private cache: Value[] | null = null;
+  constructor(desc: string, pred: (v: Value) => boolean, gen: (() => Value[]) | null) { super(); this.desc = desc; this.pred = pred; this.gen = gen; }
+  contains(v: Value): boolean { return this.cache ? bsearch(this.cache, v) >= 0 : this.pred(v); }
+  enumerable(): boolean { return this.gen !== null; }
+  elems(): Value[] {
+    if (this.cache) return this.cache;
+    if (!this.gen) return err(`Attempted to enumerate a non-enumerable set (${this.desc}).`);
+    return (this.cache = sortDedup(this.gen()));
+  }
+}
+
 // ---- kinds, comparison, equality ----
 const K_BOOL = 0, K_INT = 1, K_STR = 2, K_MODEL = 3, K_TUPLE = 4, K_REC = 5, K_FCN = 6, K_SET = 7, K_OTHER = 8;
 function kindOf(v: Value): number {
@@ -602,6 +618,7 @@ export function fmt(v: Value): string {
   if (v instanceof SeqSetV) return 'Seq(' + fmt(v.base) + ')';
   if (v instanceof InfSetV) return v.kind;
   if (v instanceof LazySetV) return v.desc;
+  if (v instanceof DerivedSetV) return v.enumerable() ? '{' + v.elems().map(fmt).join(', ') + '}' : v.desc;
   if (v && typeof v.describe === 'function') return v.describe();
   return '<operator>';
 }
