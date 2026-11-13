@@ -46,7 +46,6 @@ fn opcanon(s: &str) -> &str {
         "#" | "\\neq" => "/=",
         "\\union" => "\\cup",
         "\\intersect" => "\\cap",
-        "\\mod" => "%",
         _ => s,
     }
 }
