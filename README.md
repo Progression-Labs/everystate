@@ -1,14 +1,18 @@
 # everystate
 
-A TLA+ model checker with no Java dependency. It reads ordinary `.tla` specs and TLC `.cfg` files,
-checks every reachable state, and reports results in TLC's format.
+A TLA+ model checker with no Java dependency, written in Rust. It reads ordinary `.tla` specs and
+TLC `.cfg` files, checks every reachable state, and reports results in TLC's format.
 
-Two engines live in this repo:
+- Safety and liveness checking, fairness, symmetry, `VIEW`, `ALIAS`.
+- TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
+- The standard and community modules are built in.
+- One native binary, or WebAssembly for Node, Bun and workers.
 
-| | Status | Use it for |
-|---|---|---|
-| TypeScript (`src/`, npm `everystate`) | complete: safety, liveness, symmetry, TLC-compatible output | today |
-| Rust (`rust/`, crate `everystate`) | safety checking done, about 2x faster; liveness, full CLI and WASM in progress | becoming the main engine |
+## Install
+
+```sh
+cargo install everystate
+```
 
 ## Example
 
@@ -38,7 +42,7 @@ CHECK_DEADLOCK FALSE
 ```
 
 ```sh
-npx everystate examples/Counter.tla
+everystate examples/Counter.tla
 ```
 
 ```
@@ -61,7 +65,7 @@ Exit status is 12, as with TLC.
 ### For scripts and agents
 
 ```sh
-npx everystate -json examples/Counter.tla
+everystate -json examples/Counter.tla
 ```
 
 ```json
@@ -69,7 +73,7 @@ npx everystate -json examples/Counter.tla
  "trace":[{"action":null,"state":{"n":"0"}},{"action":"Next","state":{"n":"1"}}, ...]}
 ```
 
-### From code
+### From JavaScript (WebAssembly)
 
 ```ts
 import { check } from 'everystate';
@@ -81,12 +85,15 @@ const { result } = check({
 });
 result.status;   // 'invariant'
 result.name;     // 'NeverFour'
-result.trace;    // [{ state, action }, ...]
 ```
+
+`checkAsync` runs the same check in a worker with a large stack, for deeply recursive specs.
+The WebAssembly build is about 2x slower than native and cannot use the file-based community
+operators.
 
 ### In place of Java TLC
 
-`everystate-java` accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
+`everystate java ...` accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
 shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
 this way.
 
@@ -102,26 +109,35 @@ everystate [options] SPEC[.tla]
 ```
 
 Exit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error,
-151 config error. Runs on Node 20+ and Bun.
+151 config error.
 
 ## How it is checked
 
-Real TLC is the reference. Results for the TypeScript engine (details in
-[CONFORMANCE.md](CONFORMANCE.md)):
+Real TLC is the reference (details in [CONFORMANCE.md](CONFORMANCE.md)):
 
 - [tlaplus/Examples](https://github.com/tlaplus/Examples), models up to 5 s: 122 of 122 match on
-  result and exact state counts. Models up to 120 s: 161 of 164, the rest timed out.
-- TLC's own `test-model` suite, run side by side with `tla2tools.jar`: 377 of 414 match.
+  result and exact state counts.
+- TLC's own `test-model` suite, run side by side with `tla2tools.jar`: 384 of 414 match.
 - pstack `statechart` corpus: 33 of 33 outputs byte-identical.
 
-The Rust engine matches the TypeScript one on all 74 non-liveness Examples models up to 5 s.
-Speed comparison: [rust/BENCHMARK.md](rust/BENCHMARK.md).
+Speed is roughly level with single-worker Java TLC, with near-instant start-up:
+[BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
 Simulation mode, multiple workers, disk-backed state storage (everything is in memory, so a few
 million distinct states is the practical limit), the PlusCal translator (already-translated specs
-work), and TLAPS proof checking (proofs are parsed and skipped).
+work), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
+are parsed and skipped).
+
+## Development
+
+```sh
+npm run build      # native binary and wasm/everystate.wasm
+npm test           # WASM API, pretty-printer and community-module tests
+```
+
+An earlier pure-TypeScript engine is in the git history at commit `e8c67ce` (npm `everystate@0.1.0`).
 
 ## License
 

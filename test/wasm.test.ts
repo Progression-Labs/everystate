@@ -2,7 +2,7 @@
 // produced by the reference Java TLC (tla2tools 1.8.0).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { check, fmt } from './everystate.mjs';
+import { check, fmt } from '../wasm/everystate.mjs';
 
 const DIEHARD = `---- MODULE DieHard ----
 EXTENDS Naturals

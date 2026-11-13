@@ -4,7 +4,7 @@
 // TypeScript port.  Rows are [input, expected] or [input, expected, width].
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ppr } from "../src/pprint.ts";
+import { ppr } from "./ppr-shim.ts";
 
 type Case = readonly [input: string, expected: string, width?: number];
 

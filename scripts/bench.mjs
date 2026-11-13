@@ -2,7 +2,7 @@
 // Head-to-head benchmark: everystate (Rust, native and WebAssembly) vs the TypeScript implementation (Node and Bun) vs Java TLC,
 // all single-threaded, on a fixed list of safety-only models from tlaplus/Examples.
 //
-// usage: node rust/bench.mjs [--runs 3] [--only substring] [--skip tlc,bun] [--timeout 900]
+// usage: node scripts/bench.mjs [--runs 3] [--only substring] [--skip tlc,bun] [--timeout 900]
 //
 // Every engine is run RUNS times per model, sequentially; the median wall-clock time is reported.
 // All engines must report the same generated/distinct state counts, otherwise the row is flagged.
@@ -11,9 +11,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const here = import.meta.dirname;
+const here = path.resolve(import.meta.dirname, '..');
 const EXAMPLES = process.env.EXAMPLES ?? '/home/user/refs/Examples';
-const TS_CLI = process.env.TS_CLI ?? path.resolve(here, '../src/cli.ts');
+const TS_CLI = process.env.TS_CLI ?? path.resolve(here, 'ts-engine-removed/cli.ts');
 const TLA2TOOLS = process.env.TLA2TOOLS ?? '/home/user/refs/tla2tools.jar';
 const TLA_LIBRARY = process.env.TLA_LIBRARY ?? '/home/user/refs/tlapm/library:/home/user/refs/CommunityModules/modules';
 const RS = path.join(here, 'target/release/everystate');

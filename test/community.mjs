@@ -1,12 +1,12 @@
 // Runs the community-module fixtures and the upstream CommunityModules test specs of test/community
 // through the Rust binary (same expectations as test/community.test.ts: exit code 0 and success).
-// usage: node rust/tests/community.mjs
+// usage: node test/community.mjs
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 const bin = path.resolve(import.meta.dirname, '../target/release/everystate');
-const src = path.resolve(import.meta.dirname, '../../test/community');
+const src = path.resolve(import.meta.dirname, './community');
 // work on a scratch copy: the specs write files
 const here = fs.mkdtempSync(path.join(os.tmpdir(), 'everystate-community-'));
 fs.cpSync(src, here, { recursive: true });

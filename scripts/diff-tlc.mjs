@@ -66,7 +66,7 @@ async function worker() {
       cache[key] = ref;
       if (cacheFile) fs.writeFileSync(cacheFile, JSON.stringify(cache));
     }
-    const alt = process.env.EVERYSTATE_CMD ?? (fs.existsSync(cli) ? undefined : path.resolve(import.meta.dirname, '../rust/target/release/everystate')); // the Rust binary when the TypeScript engine is absent; // alternative engine with the same command line (e.g. the Rust binary)
+    const alt = process.env.EVERYSTATE_CMD ?? (fs.existsSync(cli) ? undefined : path.resolve(import.meta.dirname, '../target/release/everystate')); // the Rust binary when the TypeScript engine is absent; // alternative engine with the same command line (e.g. the Rust binary)
     const r = alt ? await run(alt, ['-config', path.basename(c.cfg), path.basename(c.spec)], dir)
       : await run(process.execPath, ['--experimental-strip-types', '--no-warnings', '--stack-size=30000', '--max-old-space-size=3000', cli, '-config', path.basename(c.cfg), path.basename(c.spec)], dir);
     const mine = summarise(r);
