@@ -137,8 +137,10 @@ pub struct DefRef {
 pub struct LazyFcn {
     pub node: N,
     pub ctx: C, // without the binding of the function's own name (added per application)
-    memo: RefCell<HashMap<u64, Vec<(Value, Value)>>>,
+    memo: Rc<RefCell<HashMap<u64, Vec<(Value, Value)>>>>,
     forced: RefCell<Option<Value>>,
+    /// [f EXCEPT ![k] = v] on a function that is not enumerated: later entries win
+    over: Vec<(Value, Value)>,
 }
 
 struct FnParts {
@@ -174,7 +176,7 @@ impl LazyFcn {
             let b = &bounds[0];
             let s = ev.eval_set(b.set.as_ref().unwrap(), &sc)?;
             if !s.contains(arg)? {
-                return not_in();
+                return eval_err(format!("In applying the function\n{},\nthe first argument is:\n{}\nwhich is not in its domain.\n", self.show(ev), crate::pprint::ppr(&fmt(arg))));
             }
             c = match &b.tuple {
                 Some(t) => ev.bind_tuple(t, arg, &c)?,
@@ -210,7 +212,32 @@ impl LazyFcn {
         }
         Ok(c)
     }
-    pub fn apply(self: &Rc<Self>, ev: &Evaluator, arg: &Value) -> R<Value> {
+    pub fn new(node: N, ctx: C) -> Rc<LazyFcn> {
+        Rc::new(LazyFcn { node, ctx, memo: Rc::new(RefCell::new(HashMap::new())), forced: RefCell::new(None), over: Vec::new() })
+    }
+    fn is_rec(&self) -> bool {
+        matches!(&self.node.e, E::FnDef { is_rec, .. } if is_rec.get())
+    }
+    pub fn show(self: &Rc<Self>, ev: &Evaluator) -> String {
+        match self.force(ev) {
+            Ok(Value::LazyFcn(_)) => "<lazy function>".to_string(),
+            Ok(f) => crate::pprint::ppr(&fmt(&f)),
+            Err(e) if matches!(*e, Fail::Tla(_)) => "<lazy function>".to_string(),
+            Err(_) => "<lazy function>".to_string(),
+        }
+    }
+    pub fn with_override(self: &Rc<Self>, key: Value, val: Value) -> Rc<LazyFcn> {
+        let mut over = self.over.clone();
+        over.push((key, val));
+        Rc::new(LazyFcn { node: self.node, ctx: self.ctx.clone(), memo: self.memo.clone(), forced: RefCell::new(None), over })
+    }
+    /// `lazy`: the caller keeps a function-valued result unevaluated (it is applied right away)
+    pub fn apply(self: &Rc<Self>, ev: &Evaluator, arg: &Value, lazy: bool) -> R<Value> {
+        for (k, v) in self.over.iter().rev() {
+            if val_eq(k, arg)? {
+                return Ok(v.clone());
+            }
+        }
         let mut h = Hasher::new();
         let key = if h.value(arg).is_ok() { Some(h.finish()) } else { None };
         if let Some(k) = key {
@@ -225,7 +252,8 @@ impl LazyFcn {
         check_stack()?;
         let c = self.bind(ev, arg)?;
         let (s0, p0) = (ev.st_touch.get(), ev.pr_touch.get());
-        let v = ev.eval(self.body(), &c)?;
+        // like TLC, the body of a recursive function is evaluated in keep-lazy mode
+        let v = if lazy || self.is_rec() { ev.eval_lazy(self.body(), &c)? } else { ev.eval(self.body(), &c)? };
         if let Some(k) = key {
             if ev.st_touch.get() == s0 && ev.pr_touch.get() == p0 {
                 self.memo.borrow_mut().entry(k).or_default().push((arg.clone(), v.clone()));
@@ -246,16 +274,24 @@ impl LazyFcn {
         }
         Ok(if sets.len() == 1 { sets.pop().unwrap() } else { Rc::new(SetV::new(SetK::Cross(sets))) })
     }
+    /// The enumerated function, or the lazy function itself when its domain cannot be enumerated.
     pub fn force(self: &Rc<Self>, ev: &Evaluator) -> R<Value> {
         if let Some(f) = self.forced.borrow().as_ref() {
             return Ok(f.clone());
         }
         let (s0, p0) = (ev.st_touch.get(), ev.pr_touch.get());
         let d = self.domain(ev)?;
+        if !d.enumerable() {
+            return Ok(Value::LazyFcn(self.clone())); // stays lazy: only application and EXCEPT are possible
+        }
         let dom = d.elems()?;
         let mut vals = Vec::with_capacity(dom.len());
         for x in dom {
-            vals.push(self.apply(ev, x)?);
+            let v = self.apply(ev, x, false)?;
+            vals.push(match &v {
+                Value::LazyFcn(f) => f.force(ev)?,
+                _ => v,
+            });
         }
         let f = make_fcn(dom, vals);
         if ev.st_touch.get() == s0 && ev.pr_touch.get() == p0 {
@@ -352,7 +388,7 @@ pub struct Evaluator {
 }
 
 fn undefined_ident<T>(name: Name) -> R<T> {
-    eval_err(format!("In evaluation, the identifier {} is either undefined or an operator.", name))
+    eval_err(format!("In evaluation, the identifier {} is either undefined or not an operator.", name))
 }
 
 impl Evaluator {
@@ -473,7 +509,7 @@ impl Evaluator {
         }
     }
 
-    fn force_cell(&self, e: N, ctx: &C, v: &RefCell<Value>, st: &Cell<u64>) -> R<Value> {
+    fn force_cell(&self, e: N, ctx: &C, v: &RefCell<Value>, st: &Cell<u64>, lazy: bool) -> R<Value> {
         let s = st.get();
         if s != 0 {
             if s == ANY {
@@ -485,7 +521,7 @@ impl Evaluator {
             }
         }
         let (s0, p0) = (self.st_touch.get(), self.pr_touch.get());
-        let val = self.eval(e, ctx)?;
+        let val = if lazy { self.eval_lazy(e, ctx)? } else { self.eval(e, ctx)? };
         if self.pr_touch.get() == p0 {
             if self.st_touch.get() == s0 {
                 *v.borrow_mut() = val.clone();
@@ -499,12 +535,15 @@ impl Evaluator {
     }
     #[inline]
     pub fn force(&self, lz: &Lazy) -> R<Value> {
-        self.force_cell(lz.e, &lz.ctx, &lz.v, &lz.st)
+        self.force_cell(lz.e, &lz.ctx, &lz.v, &lz.st, false)
     }
-    fn force_let(&self, node: &Rc<Ctx>, head: Rc<Ctx>) -> R<Value> {
+    pub fn force_lazy(&self, lz: &Lazy) -> R<Value> {
+        self.force_cell(lz.e, &lz.ctx, &lz.v, &lz.st, true)
+    }
+    fn force_let(&self, node: &Rc<Ctx>, head: Rc<Ctx>, lazy: bool) -> R<Value> {
         match &node.val {
             Bind::LetLazy { body, v, st } => {
-                let val = self.force_cell(body, &Some(head), v, st)?;
+                let val = self.force_cell(body, &Some(head), v, st, lazy)?;
                 // A value that captures its context (lazy set, closure, lazy function) must not be cached in a
                 // cell of that very context: the reference cycle would never be freed.
                 if captures_ctx(&val) && st.get() != 0 {
@@ -563,7 +602,13 @@ impl Evaluator {
     #[inline]
     pub fn unthunk(&self, t: &Value) -> R<Value> {
         match t {
-            Value::Thunk(lz) => self.force(lz),
+            Value::Thunk(lz) => {
+                let v = self.force(lz)?;
+                match &v {
+                    Value::LazyFcn(f) => f.force(self),
+                    _ => Ok(v),
+                }
+            }
             v => Ok(v.clone()),
         }
     }
@@ -593,12 +638,15 @@ impl Evaluator {
 
     /// Expand a definition application into (body, context) without evaluating it.
     pub fn expand_def(&self, def: &'static Def, thunks: &[Value], base: &C) -> R<Expansion> {
-        self.expand_def_raw(def.resolved(), thunks, base)
+        self.expand_def_via(def, thunks, base, false)
     }
-    /// Like expand_def, but without applying a config override (`Op <- Other`) to `def` itself: an
-    /// instantiated definition `I!Op` denotes the original body of Op even when the config replaces Op
-    /// (TLC overrides the root module's operator node, not its instantiated copies).
-    fn expand_def_raw(&self, def: &'static Def, thunks: &[Value], base: &C) -> R<Expansion> {
+    fn expand_def_via(&self, def: &'static Def, thunks: &[Value], base: &C, via_instance: bool) -> R<Expansion> {
+        // A config override (Op <- Other) replaces references to Op itself; an instantiated copy (I!Op) keeps the
+        // original body, as in TLC where the override is attached to the definition node, not to its body.
+        let def = match def.over.get() {
+            Some(o) if !(via_instance && o.builtin.get().is_none()) => o,
+            _ => def,
+        };
         if def.builtin.get().is_some() {
             return Ok(None);
         }
@@ -607,9 +655,7 @@ impl Evaluator {
                 return eval_err(format!("The operator {} expects {} arguments but was given {}.", def.name, def.params.len(), thunks.len()));
             }
             let env = self.build_env(def, thunks, base);
-            // a module-scoped override (`Op = [M]v`) replaces M's operator itself, hence also its instances
-            let orig = if inst.orig.over_scoped.get() { inst.orig.resolved() } else { inst.orig };
-            return self.expand_def_raw(orig, &thunks[inst.nparams..], &env);
+            return self.expand_def_via(inst.orig, &thunks[inst.nparams..], &env, true);
         }
         let ps = &def.params;
         if ps.len() != thunks.len() {
@@ -889,7 +935,7 @@ impl Evaluator {
             Res::Local => {
                 let b = match self.lookup(ctx, name)? {
                     Looked::Val(v) => v,
-                    Looked::LetLazy(node, head) => return self.force_let(&node, head),
+                    Looked::LetLazy(node, head) => return self.force_let(&node, head, false),
                     Looked::LetOp(d, head) => {
                         if args.is_empty() && !d.params.is_empty() {
                             return Ok(Value::Closure(Rc::new(Closure { params: &d.params, body: &d.body, ctx: Some(head), name: d.name })));
