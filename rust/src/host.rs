@@ -14,6 +14,10 @@ pub trait Host {
     fn print(&self, s: &str);
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> f64;
+    /// Current working directory (absolute), used to resolve relative spec paths.
+    fn cwd(&self) -> String {
+        "/".to_string()
+    }
 }
 
 /// A host without any capabilities (in-memory checking).
@@ -115,6 +119,9 @@ impl Host for NativeHost {
         let out = std::io::stdout();
         let mut l = out.lock();
         let _ = l.write_all(s.as_bytes());
+    }
+    fn cwd(&self) -> String {
+        std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "/".into())
     }
     fn now_ms(&self) -> f64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)

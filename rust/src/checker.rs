@@ -222,9 +222,9 @@ impl<'a> Checker<'a> {
         self.ev.stats.level.set(l as i64);
     }
 
-    pub fn fingerprint(&self, s: &StateRef) -> R<u64> {
+    /// The values that identify a state: the VIEW value, or all variables, of the symmetry-canonical state.
+    pub fn fingerprint_input(&self, s: &StateRef) -> R<Vec<Value>> {
         let m = self.model;
-        let mut h = Hasher::new();
         let mut canon: Option<Vec<Value>> = None;
         if let Some(sym) = &m.symmetry {
             let base = s.snapshot(self.nvars);
@@ -256,20 +256,26 @@ impl<'a> Checker<'a> {
             };
             self.ev.set_state(&t, None);
             self.ev.init_mode.set(false);
-            h.value(&self.ev.eval(view.e, &view.ctx)?)?;
-        } else {
-            match &canon {
-                Some(c) => {
-                    for v in c {
-                        h.value(v)?;
-                    }
+            return Ok(vec![self.ev.eval(view.e, &view.ctx)?]);
+        }
+        Ok(match canon {
+            Some(c) => c,
+            None => s.snapshot(self.nvars),
+        })
+    }
+
+    pub fn fingerprint(&self, s: &StateRef) -> R<u64> {
+        let mut h = Hasher::new();
+        if self.model.symmetry.is_none() && self.model.view.is_none() {
+            s.with(|vals| -> R<()> {
+                for v in &vals[..self.nvars] {
+                    h.value(v)?;
                 }
-                None => s.with(|vals| -> R<()> {
-                    for v in &vals[..self.nvars] {
-                        h.value(v)?;
-                    }
-                    Ok(())
-                })?,
+                Ok(())
+            })?;
+        } else {
+            for v in self.fingerprint_input(s)? {
+                h.value(&v)?;
             }
         }
         Ok(h.finish())
