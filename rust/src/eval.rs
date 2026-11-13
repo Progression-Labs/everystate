@@ -1195,14 +1195,19 @@ impl Evaluator {
     #[inline(never)]
     pub fn eval(&self, n: N, ctx: &C) -> R<Value> {
         if self.tracing.get() {
-            self.trace_stack.borrow_mut().push(n);
-            let r = self.eval_inner(n, ctx);
-            if r.is_ok() {
-                self.trace_stack.borrow_mut().pop();
-            }
-            return r;
+            return self.eval_traced(n, ctx);
         }
         self.eval_inner(n, ctx)
+    }
+    #[cold]
+    #[inline(never)]
+    fn eval_traced(&self, n: N, ctx: &C) -> R<Value> {
+        self.trace_stack.borrow_mut().push(n);
+        let r = self.eval_inner(n, ctx);
+        if r.is_ok() {
+            self.trace_stack.borrow_mut().pop();
+        }
+        r
     }
     #[inline(always)]
     fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {

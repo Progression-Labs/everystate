@@ -132,6 +132,8 @@ pub struct Assume {
     pub e: N,
     pub name: Option<Name>,
     pub module: Name,
+    /// AXIOM: parsed and resolved like ASSUME, but TLC does not evaluate it (SpecProcessor.assumptionIsAxiom).
+    pub axiom: bool,
 }
 
 #[derive(Default)]
@@ -388,8 +390,8 @@ impl Loader {
                     }
                     resolve_later.push((u, substs));
                 }
-                Unit::Assume { name: nm, e, loc } => {
-                    info.assumes.push(leak(Assume { e, name: *nm, module: me }));
+                Unit::Assume { name: nm, e, loc, axiom } => {
+                    info.assumes.push(leak(Assume { e, name: *nm, module: me, axiom: *axiom }));
                     if let Some(nm) = nm {
                         let def = leak(Def::new(*nm, vec![], Some(e), me, false, *loc));
                         add(&mut info, outer, me, *nm, Sym::Def(def), false, *loc)?;

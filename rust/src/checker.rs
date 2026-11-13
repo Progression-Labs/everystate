@@ -419,6 +419,9 @@ impl<'a> Checker<'a> {
     fn check_assumptions(&self) -> Option<CheckResult> {
         let ev = self.ev;
         for a in &self.model.root.assumes {
+            if a.axiom {
+                continue; // TLC does not evaluate AXIOMs
+            }
             ev.set_state(&self.empty, None);
             ev.init_mode.set(false);
             let at = loc_str(&a.e.loc, &a.module.to_string());
