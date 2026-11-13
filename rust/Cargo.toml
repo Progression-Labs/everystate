@@ -2,6 +2,9 @@
 name = "everystate"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/mattzcarey/everystate"
+description = "A TLA+ model checker (TLC-compatible)"
+license = "MIT"
 
 [lib]
 name = "everystate"
