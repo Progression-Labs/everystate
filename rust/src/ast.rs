@@ -168,7 +168,7 @@ pub enum Unit {
     Recursive,
     Def(DefNode),
     Instance(InstNode),
-    Assume { name: Option<Name>, e: Node, loc: Loc },
+    Assume { name: Option<Name>, e: Node, loc: Loc, axiom: bool },
     Theorem { name: Option<Name>, e: Node, loc: Loc },
     Module(ModuleNode),
 }

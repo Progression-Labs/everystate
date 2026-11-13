@@ -297,6 +297,7 @@ impl Parser {
                 }
                 "INSTANCE" => return Ok(Some(Unit::Instance(self.parse_instance()?))),
                 "ASSUME" | "ASSUMPTION" | "AXIOM" => {
+                    let axiom = &*t.v == "AXIOM";
                     self.next()?;
                     let mut nm = None;
                     if self.peek().t == T::Id && is_op(self.peek_at(1), "==") {
@@ -305,7 +306,7 @@ impl Parser {
                     }
                     let e = self.parse_expr()?;
                     let loc = [t.line, t.col, self.last.line, self.last.ec];
-                    return Ok(Some(Unit::Assume { name: nm, e, loc }));
+                    return Ok(Some(Unit::Assume { name: nm, e, loc, axiom }));
                 }
                 "USE" | "HIDE" => {
                     self.next()?;
@@ -689,6 +690,19 @@ impl Parser {
             }
             self.next()?;
             let op = &*t.v;
+            // SANY's second conflict rule: unary minus (12-12) as the right operand of an infix operator
+            // that binds tighter (`a * -b`, `2 ^ -x`, `s \o -t`).  Other prefix operators are accepted there.
+            if info.0 > 12 && self.isop("-") {
+                return Err(Box::new(Fail::Tla(TlaError {
+                    msg: format!(
+                        "***Parse Error***\n  Precedence conflict between ops {} in block line {}, col {} to line {}, col {} of module {} and -..",
+                        t.v, t.line, t.col, t.line, t.ec, self.module
+                    ),
+                    loc: Some([t.line, t.col, self.peek().line, self.peek().ec]),
+                    module: Some(self.module.clone()),
+                    kind: "parse",
+                })));
+            }
             let (bl, bc) = (left.loc[0], left.loc[1]);
             if op == "\\X" {
                 let mut items = vec![left, self.parse_bin(info.1 + 1)?];
