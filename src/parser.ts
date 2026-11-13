@@ -846,6 +846,11 @@ class Parser {
           fields.push({ name: f.v, e: this.parseExpr() });
         } while (this.eatOp(','));
         this.expectOp(']');
+        const seen = new Set<string>();
+        for (const f of fields) {
+          if (seen.has(f.name)) throw new TlaError(`line ${f.e.loc[0]}, col ${f.e.loc[1]} to line ${f.e.loc[2]}, col ${f.e.loc[3]} of module ${this.mod}\n\nNon-unique fields in constructor.`, f.e.loc, this.mod, 'semantic');
+          seen.add(f.name);
+        }
         return this.node(isRec ? 'rec' : 'recset', t, { fields });
       }
       // [x \in S |-> e]

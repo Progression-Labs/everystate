@@ -178,7 +178,7 @@ export class Loader {
           const seen = new Set<Node>();
           resolveLater.push(() => {
             const scope: Scope | null = u.params.length ? { names: new Map(u.params.map((p: Param) => [p.name, { used: false }])), parent: null } : null;
-            for (const s of substs) if (!seen.has(s.e)) { seen.add(s.e); this.resolve(s.e, scope, info); }
+            for (const s of substs) if (!seen.has(s.e)) { seen.add(s.e); if (s.e.k === 'app') s.e.opArg = true; this.resolve(s.e, scope, info); }
           });
           break;
         }
@@ -240,8 +240,15 @@ export class Loader {
             throw new TlaError(`Unknown operator: \`${n.name}'.`, n.loc, mod.name, 'semantic');
           }
           n.r = sym;
+          // arity check (a bare operator name is fine where an operator argument is expected)
+          if (!n.sel) {
+            const want = sym.k === 'def' ? ((sym.override ?? sym).params.length) : sym.k === 'const' ? sym.arity : 0;
+            if (n.args.length !== want && !(n.args.length === 0 && n.opArg)) {
+              throw new TlaError(`line ${n.loc[0]}, col ${n.loc[1]} to line ${n.loc[2]}, col ${n.loc[3]} of module ${mod.name}\n\nThe operator ${n.name} requires ${want} arguments.`, n.loc, mod.name, 'semantic');
+            }
+          }
         }
-        for (const a of n.args) R(a);
+        for (const a of n.args) { if (a.k === 'app' && a.args.length === 0) a.opArg = true; R(a); }
         if (n.sel) for (const s of n.sel) if (Array.isArray(s)) for (const a of s) R(a);
         return;
       }
@@ -288,7 +295,7 @@ export class Loader {
         for (const d of n.defs as any[]) {
           if (d.k !== 'def') {
             const ds: Scope = d.params.length ? { names: new Map(d.params.map((p: Param) => [p.name, { used: false }])), parent: s } : s;
-            for (const x of d.instSubsts) this.resolve(x.e, ds, mod);
+            for (const x of d.instSubsts) { if (x.e.k === 'app') x.e.opArg = true; this.resolve(x.e, ds, mod); }
             continue;
           }
           const ds: Scope = d.params.length ? { names: new Map(d.params.map((p: Param) => [p.name, { used: false }])), parent: s } : s;
