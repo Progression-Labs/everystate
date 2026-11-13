@@ -1989,6 +1989,25 @@ impl Evaluator {
 
     // ---------- ENABLED ----------
     fn enabled(&self, a: N, ctx: &C) -> R<bool> {
+        self.enabled_by(ctx, &mut |c, k| self.enumerate(a, c, k))
+    }
+    /// ENABLED <<A>>_v for an action and subscript given separately (fairness conditions).
+    pub fn enabled_angle(&self, a: N, v: N, ctx: &C) -> R<bool> {
+        self.enabled_by(ctx, &mut |c, k| {
+            self.enumerate(a, c, &mut || {
+                if !self.unchanged_val(v, c)? {
+                    return k();
+                }
+                Ok(())
+            })
+        })
+    }
+    /// <<A>>_v as a predicate on a pair of states.
+    pub fn eval_angle(&self, a: N, v: N, ctx: &C) -> R<bool> {
+        Ok(self.eval_bool(a, ctx)? && !self.unchanged_val(v, ctx)?)
+    }
+    #[allow(clippy::type_complexity)]
+    fn enabled_by(&self, ctx: &C, run: &mut dyn FnMut(&C, &mut dyn FnMut() -> R<()>) -> R<()>) -> R<bool> {
         let marked: C;
         let mut ctx = ctx;
         let base = base_of(ctx);
@@ -2005,7 +2024,7 @@ impl Evaluator {
         self.init_mode.set(false);
         self.n_assigned.set(-1_000_000_000); // no all-assigned shortcut inside ENABLED
         self.in_enabled.set(self.in_enabled.get() + 1);
-        let r = self.enumerate(a, ctx, &mut || Err(Box::new(Fail::Found)));
+        let r = run(ctx, &mut || Err(Box::new(Fail::Found)));
         *self.nxt.borrow_mut() = sn;
         self.init_mode.set(im);
         self.n_assigned.set(na);
