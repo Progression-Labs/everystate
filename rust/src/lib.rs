@@ -5,6 +5,7 @@ pub mod bundled;
 pub mod cfg;
 pub mod checker;
 pub mod cli;
+pub mod community;
 pub mod eval;
 pub mod host;
 pub mod intern;

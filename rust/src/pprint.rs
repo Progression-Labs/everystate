@@ -337,7 +337,7 @@ pub fn ppr(value: &str) -> String {
     ppr_width(value, 80)
 }
 pub fn ppr_width(value: &str, width: i64) -> String {
-    if value.len() as i64 <= width && !value.starts_with(|c: char| c.is_whitespace()) {
+    if value.len() as i64 <= width && !value.chars().next().map_or(true, |c| (c as u32) < 0x10000 && is_whitespace(c as u32 as u16)) {
         // fast path: a value that parses completely and fits is returned as is; one that does not parse is
         // returned as is as well
         return value.to_string();

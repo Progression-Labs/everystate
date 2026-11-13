@@ -11,7 +11,9 @@ const filter = args.includes('--filter') ? args[args.indexOf('--filter') + 1] : 
 const corpus = path.join(sc, 'test/corpus');
 const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-shim-'));
 const shim = path.join(shimDir, 'java');
-fs.writeFileSync(shim, `#!/bin/sh\nexec ${process.execPath} --experimental-strip-types --no-warnings --stack-size=30000 ${path.resolve(import.meta.dirname, '../src/java.ts')} "$@"\n`, { mode: 0o755 });
+// EVERYSTATE_JAVA_CMD: an alternative java shim (e.g. "/path/to/everystate java" for the Rust binary)
+const javaCmd = process.env.EVERYSTATE_JAVA_CMD ?? `${process.execPath} --experimental-strip-types --no-warnings --stack-size=30000 ${path.resolve(import.meta.dirname, '../src/java.ts')}`;
+fs.writeFileSync(shim, `#!/bin/sh\nexec ${javaCmd} "$@"\n`, { mode: 0o755 });
 let pass = 0, fail = 0;
 for (const name of fs.readdirSync(corpus).sort()) {
   if (filter && !name.includes(filter)) continue;

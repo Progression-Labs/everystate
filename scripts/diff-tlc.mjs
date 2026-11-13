@@ -66,7 +66,9 @@ async function worker() {
       cache[key] = ref;
       if (cacheFile) fs.writeFileSync(cacheFile, JSON.stringify(cache));
     }
-    const r = await run(process.execPath, ['--experimental-strip-types', '--no-warnings', '--stack-size=30000', '--max-old-space-size=3000', cli, '-config', path.basename(c.cfg), path.basename(c.spec)], dir);
+    const alt = process.env.EVERYSTATE_CMD; // alternative engine with the same command line (e.g. the Rust binary)
+    const r = alt ? await run(alt, ['-config', path.basename(c.cfg), path.basename(c.spec)], dir)
+      : await run(process.execPath, ['--experimental-strip-types', '--no-warnings', '--stack-size=30000', '--max-old-space-size=3000', cli, '-config', path.basename(c.cfg), path.basename(c.spec)], dir);
     const mine = summarise(r);
     if (mine.kind.startsWith('other') || mine.kind === 'error' || mine.kind === 'parse-error' || mine.kind === 'config-error') mine.tail = r.o.split('\n').filter(l => /Error|error|at line|Unknown|Expected/.test(l)).slice(0, 2).join(' | ').slice(0, 220);
     let verdict = 'PASS';

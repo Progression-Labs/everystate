@@ -11,7 +11,7 @@ const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] :
 const timeout = Number(opt('--timeout', 60)) * 1000, jobs = Number(opt('--jobs', 3)), filter = opt('--filter', '');
 const cacheFile = opt('--cache', ''), show = Number(opt('--show', 12)), tool = args.includes('--tool');
 const cli = path.resolve(import.meta.dirname, '../../src/cli.ts');
-const rs = path.resolve(import.meta.dirname, '../target/release/everystate');
+const rs = process.env.EVERYSTATE_BIN ?? path.resolve(import.meta.dirname, '../target/release/everystate');
 const cache = cacheFile && fs.existsSync(cacheFile) ? JSON.parse(fs.readFileSync(cacheFile, 'utf8')) : {};
 const cases = [];
 const walk = d => {
