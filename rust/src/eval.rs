@@ -1070,6 +1070,18 @@ impl Evaluator {
                 None => return eval_err("TLC cannot handle unbounded quantification.".into()),
             };
             let s = self.eval_set(set, ctx)?;
+            if let (SetK::Interval(lo, hi), Some(names)) = (&s.k, &b.names) {
+                if names.len() == 1 {
+                    // an integer interval is walked without materializing its elements
+                    let nm = names[0];
+                    for i in *lo..=*hi {
+                        if f(&cons(nm, Value::Int(i), ctx))? {
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
+            }
             let es = self.elems_at(&s, set)?;
             if let Some(t) = &b.tuple {
                 for x in es {
@@ -1759,6 +1771,15 @@ impl Evaluator {
             let s = self.eval_set(b.set.as_ref().unwrap(), ctx)?;
             if !s.enumerable() {
                 return Ok(lazy());
+            }
+            if let (SetK::Interval(1, hi), None) = (&s.k, &b.tuple) {
+                // [i \in 1..n |-> e] is a sequence: no domain needs to be materialized
+                let nm = b.names.as_ref().unwrap()[0];
+                let mut vals = Vec::with_capacity((*hi).max(0) as usize);
+                for i in 1..=*hi {
+                    vals.push(self.eval(body, &cons(nm, Value::Int(i), ctx))?);
+                }
+                return Ok(if vals.is_empty() { empty_tuple() } else { Value::Tuple(TupleV::rc(vals)) });
             }
             let dom = s.elems()?;
             let mut vals = Vec::with_capacity(dom.len());

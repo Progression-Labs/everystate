@@ -1,87 +1,117 @@
-# verify-rs
+# everystate (Rust)
 
-A Rust port of the safety-checking core of verify.js (the TypeScript reimplementation of the TLC
-model checker in this repository). It exists so that the two implementations can be benchmarked head
-to head on identical work: same parser, same evaluation semantics, same breadth-first search, same
-counting rules, single-threaded.
+The Rust engine of everystate: a TLA+ model checker that is command-line and output compatible with
+TLC. It is a port of the TypeScript engine in `../src`, which remains the reference oracle; real TLC
+(`scripts/tlc.sh`) is the specification for both.
 
-It was ported from the frozen snapshot `refs/ts-snapshot/src` (lexer, parser, modules, values, eval,
-stdlib, cfg, model, checker). Liveness checking is **not** ported.
+It covers safety and liveness checking, TLC's text and `-tool` output, state dumps, the `java`
+command-line shim, the native standard and community modules, and it also builds as WebAssembly.
 
 ## Build and run
 
 ```
 cd rust
 cargo build --release
-target/release/verify-rs [-json] [-config FILE] [-deadlock] SPEC.tla
+target/release/everystate [options] SPEC[.tla]
 ```
 
-- `-json` prints exactly one line of JSON with the same fields as `verify -json`:
-  `{"status","name","message","generated","distinct","queue","depth","trace":[{"action","state":{var:"value"}}]}`.
-  Status strings are the TypeScript ones: `ok`, `invariant`, `invariant-init`, `deadlock`,
-  `action-property`, `implied-init`, `assumption`, `error`, `incomplete`, `init-error`, `setup-error`.
-- A model with a temporal (liveness) property is not checked at all; the answer is
-  `{"status":"unsupported-liveness", ...}` (exit status 2).
-- Without `-json` a short human-readable summary (and the error trace) is printed.
-- Exit statuses follow the TypeScript CLI (0 ok, 10 assumption, 11 deadlock, 12 invariant,
-  13 action property, 150/151 setup errors, 255 other errors).
+| option | meaning |
+|---|---|
+| `-config FILE` | configuration file (default `SPEC.cfg`) |
+| `-deadlock` | do not check for deadlock |
+| `-tool` | TLC's machine-readable message framing (`@!@!@STARTMSG ...`) |
+| `-dump FILE`, `-dump dot[,actionlabels] FILE` | write the reachable states / the state graph |
+| `-json` | one JSON line: `{"status","name","message","generated","distinct","queue","depth","loopTo","trace":[{"action","state":{var:"value"}}]}` |
+| `-workers N`, `-metadir DIR`, `-lncheck S`, ... | accepted and ignored, as in the TypeScript CLI |
 
-Dependencies: `std` plus `mimalloc` (global allocator; 3-23 % faster than glibc malloc on the models
-tried, because the evaluator allocates many small reference-counted nodes). `[profile.profiling]` in
-`Cargo.toml` is a release build with debug info for callgrind.
+Exit statuses are TLC's: 0 success, 10 assumption, 11 deadlock, 12 invariant, 13 property (action
+property, implied init, liveness), 75/76 evaluation errors, 150 parse error, 151 config error, 255 other.
+
+**Java shim.** `everystate java -cp tla2tools.jar tlc2.TLC ...` (or the same binary installed under
+the name `everystate-java` or `java`) emulates the `java` command line of the TLA+ tools:
+`tlc2.TLC`, `tla2sany.xml.XMLExporter` and `tla2sany.SANY`, with `-DTLA-Library=` as library path.
+
+## WebAssembly
+
+```
+rust/wasm/build.sh          # cargo build --target wasm32-unknown-unknown, copies wasm/everystate.wasm (1.7 MB)
+```
+
+`wasm/everystate.mjs` (types in `everystate.d.ts`) exposes the same API as the TypeScript package:
+
+```js
+import { check, checkAsync, fmt } from './rust/wasm/everystate.mjs';
+const { result, model } = check({ root: 'Spec', modules: { Spec: source }, config: 'INIT Init\nNEXT Next', deadlock: true, print: console.log });
+```
+
+- Target `wasm32-unknown-unknown`, no JS toolchain: a hand-written loader with two imports
+  (`es_print`, `es_now`). Works in Node and Bun as is; in a browser call `await init(fetch(url))` first.
+- The core has no direct file-system, clock or process access (`src/host.rs` is the only door), so
+  file-based community operators report "not available" under WebAssembly.
+- Differences from the TypeScript `check`: a trace state is an array of formatted values (strings, in
+  `model.vars` order), `fmt` is the identity on them, and `model` only has `vars`. Setup errors throw.
+- Each call runs in a fresh instance, so string ordering starts from scratch as `resetInterning()` does.
+- **Recursion.** WebAssembly calls use the JavaScript engine's stack. With the default stack, Node
+  evaluates between 500 and 1000 nested TLA+ operator applications and Bun between 1000 and 2000
+  (measured with `Sum(n) == IF n = 0 THEN 0 ELSE n + Sum(n - 1)`); beyond that `check` returns
+  `status: "error"` with the "Stack overflow ..." message instead of crashing, but without counts.
+  `checkAsync` runs the check in a Node worker thread with a 256 MB stack, which reaches the
+  evaluator's own limit of 6000 (as does `node --stack-size=30000`). The linear-memory stack is 64 MiB
+  (`.cargo/config.toml`) and is guarded separately.
+- `node rust/wasm/cli.mjs [-config FILE] SPEC.tla` is a small CLI on top of it (used by the benchmark).
+
+## Verification
+
+All of these are run against real TLC results or against the TypeScript engine:
+
+| check | command | result |
+|---|---|---|
+| tlaplus/Examples manifest, runtime <= 5 s | `EVERYSTATE_CMD=rust/target/release/everystate node scripts/conformance.mjs <Examples> --max-runtime 5 --timeout 120` (from the Examples checkout) | 122 / 122 |
+| TLC `test-model` differential | `EVERYSTATE_CMD=... node scripts/diff-tlc.mjs <test-model>` | 372 / 414, TypeScript 371 in the same run (see BENCHMARK.md for why this is not 377) |
+| pstack statechart corpus through the Java shim | `EVERYSTATE_JAVA_CMD="rust/target/release/everystate java" node scripts/statechart-corpus.mjs <scripts>` | 33 / 33 byte-identical |
+| complete text output vs TypeScript on `test-model` | `node rust/scripts/diff-ts.mjs <test-model>` (also with `--tool`) | 398 of 408 identical; the 10 differences are listed in BENCHMARK.md |
+| pretty-printer, 337 cases produced by Java | `node --experimental-strip-types --test rust/tests/pprint.test.ts` | all pass |
+| community-module fixtures and upstream tests | `node rust/tests/community.mjs` | 21 / 21 |
+| WebAssembly API | `node --experimental-strip-types --test rust/wasm/check.test.ts`, `bun test rust/wasm/check.test.ts` | 6 / 6 each |
 
 ## Layout
 
 | file | ported from | contents |
 |---|---|---|
-| `src/intern.rs` | values.ts (`strId`) | identifier interner, and the string interner whose ids reproduce TLC's first-seen string order |
+| `src/intern.rs` | values.ts (`strId`) | identifier interner; string interner whose ids reproduce TLC's first-seen string order |
 | `src/lexer.rs`, `src/parser.rs`, `src/ast.rs` | lexer.ts, parser.ts | tokens, column-sensitive junction lists, precedence climbing, proofs parsed and skipped |
-| `src/modules.rs` | modules.ts | module loading, EXTENDS / INSTANCE (named, parameterised, LOCAL, in LET), name resolution, levels |
-| `src/value.rs` | values.ts | values in canonical form, symbolic sets, TLC ordering, equality, fingerprint hashing, printing |
-| `src/eval.rs` | eval.ts | evaluator, lazy thunks with state-keyed caching, ENABLED, primes, recursive functions, action enumeration |
-| `src/stdlib.rs` | stdlib.ts, part of community.ts | Naturals, Integers, Reals, Sequences, FiniteSets, TLC, TLCExt, Bags, Randomization; native overrides for the hot community operators |
-| `src/cfg.rs`, `src/model.rs` | cfg.ts, model.ts | config parsing, constants, substitution, SPECIFICATION splitting, action splitting, properties, symmetry group closure, VIEW |
-| `src/checker.rs` | checker.ts | BFS, fingerprint set, counting rules, deadlock, trace reconstruction, POSTCONDITION |
-| `repro/` | - | minimal specs for the TypeScript bugs found while porting |
-| `lib/*.tla`, `src/bundled.rs` | bundled.ts | the bundled community / TLAPS modules, exported once by `scripts/export-lib.mjs` and embedded with `include_str!` |
+| `src/modules.rs` | modules.ts | module loading, EXTENDS / INSTANCE, name resolution, arity checks, levels |
+| `src/value.rs` | values.ts | values in canonical form, symbolic and lazy sets, TLC ordering, equality, hashing, printing |
+| `src/eval.rs` | eval.ts | evaluator: thunks with state-keyed caching, keep-lazy functions, ENABLED, primes, action enumeration |
+| `src/stdlib.rs`, `src/community.rs` | stdlib.ts, community.ts | standard modules and all native community-module operators |
+| `src/cfg.rs`, `src/model.rs` | cfg.ts, model.ts | config, constants, substitution, spec / action splitting, properties, symmetry, VIEW, ALIAS, _POSSIBLE |
+| `src/checker.rs`, `src/liveness.rs` | checker.ts, liveness.ts | BFS, counting rules, traces, tableau, product graph, SCC search, lasso counterexamples, POSTCONDITION |
+| `src/pprint.rs` | pprint.ts | TLC's 80-column value pretty-printer |
+| `src/cli.rs`, `src/main.rs` | main.ts, java.ts | TLC-compatible CLI, `-tool`, `-dump`, XMLExporter, Java shim |
+| `src/tshash.rs` | values.ts (`Hasher`) | the TypeScript fingerprint, bit for bit, used only for node ids in `-dump dot` |
+| `src/host.rs`, `src/wasm.rs`, `wasm/` | node-host.ts, index.ts | host abstraction, WebAssembly exports, JS wrapper |
+| `lib/*.tla`, `src/bundled.rs` | bundled.ts | bundled community / TLAPS modules (`scripts/export-lib.mjs` regenerates them) |
+| `repro/` | - | minimal specs for bugs found in the TypeScript engine |
+| `scripts/diff-ts.mjs`, `tests/` | - | differential and reuse-the-TS-tests harnesses |
 
-`node scripts/export-lib.mjs /path/to/ts/src/bundled.ts` regenerates `lib/` and `src/bundled.rs`.
+## Dependencies
 
-## How it differs from the TypeScript code (design, not behaviour)
+- `mimalloc` (native builds only): the evaluator allocates many small reference-counted nodes; it was
+  3-23 % faster than glibc malloc on the models tried. WebAssembly uses the standard allocator.
+- Nothing else; no dependency at all for the WebAssembly build.
 
-- The AST is a typed enum, leaked once per module so the evaluator holds `&'static Node`.
-- Identifiers are interned to integers; contexts are `Rc` linked lists compared by integer name.
-- Values are a 16-byte enum; tuples, records, functions and sets are `Rc`-shared and immutable.
-  Record field-name vectors and function domains are shared between values with the same shape.
-- A state is one `Rc` buffer; the evaluator never copies a state to evaluate it.
-- The fingerprint is a single 64-bit hash (folded multiply) stored in an open-addressing table.
-- LET definitions are bound without the reference cycles the TypeScript version relies on the
-  garbage collector for (a LET cell finds its group through the context walk); values that capture
-  their context (lazy filtered sets, closures, lazy functions) are not cached in LET cells.
-- Symmetry reduction permutes values copy-on-write (unchanged subtrees are shared).
+## Known differences from the TypeScript engine
 
-## Known deviations from the TypeScript implementation
-
-- No liveness (reported as `unsupported-liveness`), no `-tool` output, no `-dump`, no ALIAS, no
-  `_POSSIBLE`, no simulation. TLCGet("config"/"stats"/"level"/...) and TLCSet("exit", TRUE) work.
-- Only these community operators are native: FiniteSetsExt (FoldSet, Quantify, SumSet, ProductSet,
-  Max, Min, kSubset), Functions (Range, IsInjective, AntiFunction, FoldFunction, FoldFunctionOnSet),
-  Folds (MapThenFoldSet), SequencesExt (FoldSeq, FoldLeft, FoldRight, FoldLeftDomain, FoldRightDomain,
-  ToSet, Reverse, Cons, Front, Last, IsSuffix, Contains, IsPrefix, SetToSeq, SetToSeqs, RemoveFirst),
-  Bitwise (And, Or, Xor), IOUtils (IOEnv, atoi), Json (JsonDeserialize, ndJsonDeserialize),
-  VectorClocks (CausalOrder). Everything else in those modules runs from its TLA+ definition in
-  `lib/`; operators that are not executable from TLA+ (file output, CSV, SVG, process execution,
-  serialization) are missing.
-- Runtime-created strings (`\o`, ToString) are interned when created instead of when first compared.
-  This can only change the relative order of two strings that never appeared in the spec or config.
-- Descriptions of lazy sets are built only when an error message needs them. The TypeScript version
-  formats them eagerly, which enumerates nested lazy sets (see BENCHMARK.md, "bugs found").
-- Deep recursion is limited by a 1 GiB evaluation stack instead of Node's 256 MB.
-- Three deliberate behaviour changes, each a bug in the TypeScript version confirmed against TLC
-  (BENCHMARK.md, "Bugs found"; repro specs in `repro/`): `UNION` over sets that are not explicit
-  stays lazy; a config replacement `Op <- Other` does not apply to `I!Op` inside an instance of the
-  same module; lazy-set descriptions are not built eagerly.
-- Symmetry canonicalisation stops permuting a state at the first variable that compares larger than
-  the best candidate. The canonical state, and therefore every count, is unchanged.
-- Enumerated function sets and record sets skip the "already sorted?" check (odometer order over
-  normalized components is the normalized order).
+- `SUBSET S \cup T`, `[]x = 1` and other prefix operators followed by an infix operator of overlapping
+  precedence are rejected with SANY's "Precedence conflict" (TypeScript accepts them); `DOMAIN` has
+  precedence 9-9 as in SANY. SANY's second conflict rule (`a * -b`, `2 ^ -x`, `a \o -b`) is still accepted.
+- A step reference with arguments in a proof (`<1>4!1!(v)`) parses; TypeScript reports a parse error.
+- Stack exhaustion is always reported as TLC-style "Stack overflow ..." (TypeScript can die with a raw
+  `RangeError` while normalising temporal formulas, e.g. test-model `Github1389Loops`).
+- `RandomElement` / `Randomization` use a different generator, so runs that depend on random choices
+  differ (as they do between two TLC runs).
+- Timestamps are printed in UTC.
+- Runtime-created strings are interned when created rather than when first compared; this can only
+  reorder two strings that never appear in the spec or config.
+- Internals that do not change results: one 64-bit fingerprint with per-value hash caching, early-exit
+  symmetry canonicalisation, copy-on-write permutation, no reference cycles for LET definitions.
