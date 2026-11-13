@@ -227,7 +227,7 @@ export class Checker {
       try {
         ok = ev.eval(a.e, null);
       } catch (e) {
-        if (e instanceof TlaError) return this.result('error', { message: `Evaluating assumption ${locStr(a.e.loc, a.module)} failed.\n${e.message}`, printSummary: false });
+        if (e instanceof TlaError) return this.result('error', { code: 2105, message: `Evaluating assumption ${locStr(a.e.loc, a.module)} failed.\n${e.message}`, printSummary: false });
         throw e;
       }
       if (typeof ok !== 'boolean') return this.result('error', { message: `The assumption ${locStr(a.e.loc, a.module)} was not a boolean.`, printSummary: false });
@@ -311,6 +311,7 @@ export class Checker {
           }
           if (!ok) return this.result('implied-init', { name: p.name, trace: [{ state: s, action: null, id }], printSummary: false });
         }
+
       }
     }
     return null;
@@ -350,7 +351,8 @@ export class Checker {
     const succs: State[] = [], succAct: number[] = [];
     const record = !!this.opts.recordGraph;
     let lastProgress = Date.now();
-    if (m.actions.length === 0 || m.inits.length === 0) return this.result('ok');
+    if (m.inits.length === 0) return this.result('ok');
+    if (m.actions.length === 0) return this.result('error', { code: 2115, message: 'No next state actions defined to generate successor states from.', printSummary: false });
     while (this.head < this.states.length && !this.stopRequested) {
       const sid = this.head++;
       const s = this.states[sid];
@@ -398,9 +400,11 @@ export class Checker {
           for (const inv of m.invariants) {
             let ok: boolean;
             try { ok = this.evalPred(inv, t, null); } catch (e) {
-              return this.result('error', { code: 2111, message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e, false)}`,
+              const r = this.result('error', { code: 2111, message: `Evaluating invariant ${inv.name} failed.\n${this.describeErr(e, false)}`,
                 callStack: inModel ? undefined : this.nestedExpressions(inv, t, null),
                 trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id }] });
+              if (inModel) r.queue = Math.max(0, r.queue - 1); // the new state has not been enqueued yet
+              return r;
             }
             if (!ok) {
               const r = this.result('invariant', { name: inv.name, trace: [...this.traceTo(sid), { state: t, action: m.actions[succAct[i]], id }] });

@@ -125,7 +125,11 @@ export class FcnSetV extends SetBase {
   constructor(dom: SetBase, rng: SetBase) { super(); this.dom = dom; this.rng = rng; }
   contains(v: Value): boolean {
     const d = domainOf(v);
-    if (d === null) return false;
+    if (d === null) {
+      if (v instanceof ModelValue) return v.type === null ? false : err(`Attempted to check if the typed model value ${v.name} is an element of\n${fmt(this)}`);
+      if (v instanceof SetBase || typeof v !== 'object') return err(`Attempted to check if \n${fmt(v)}\nwhich is not a TLC function value, is in the set of functions:\n${fmt(this)}`);
+      return false;
+    }
     if (!setEq(d, this.dom)) return false;
     for (const x of fcnValues(v)) if (!this.rng.contains(x)) return false;
     return true;
@@ -357,7 +361,10 @@ export function compare(a: Value, b: Value): number {
 }
 
 function modelCmp(m: ModelValue, o: Value): number {
-  if (o instanceof ModelValue) return m.id - o.id;
+  if (o instanceof ModelValue) {
+    if (m.type !== o.type && m.type !== null && o.type !== null) return err(`Attempted to compare the differently-typed model values ${m.name} and ${o.name}`);
+    return m.id - o.id;
+  }
   if (m.type !== null) return err(`Attempted to compare the typed model value ${m.name} with the non-model value\n${fmt(o)}`);
   return -1; // an untyped model value is smaller than every non-model value
 }
