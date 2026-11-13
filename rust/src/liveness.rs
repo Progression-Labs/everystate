@@ -178,6 +178,7 @@ impl<'a, 'b> Liveness<'a, 'b> {
     }
 
     fn to_live(&mut self, e: N, ctx: &C) -> R<L> {
+        check_stack()?;
         let ev = self.model.ev;
         let l = expr_level(ev, e, ctx);
         if l == 0 {

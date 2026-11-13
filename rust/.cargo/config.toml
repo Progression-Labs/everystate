@@ -1,0 +1,4 @@
+# WebAssembly build: `cargo build --release --target wasm32-unknown-unknown --lib`
+# A 64 MiB linear-memory stack (the default is 1 MiB) for deeply recursive specifications.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=67108864"]

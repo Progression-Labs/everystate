@@ -307,7 +307,7 @@ pub fn set_stack_limit(bytes: usize) {
     STACK_LIMIT.with(|c| c.set(bytes));
 }
 #[inline]
-fn check_stack() -> R<()> {
+pub fn check_stack() -> R<()> {
     let x = 0u8;
     let here = &x as *const u8 as usize;
     let used = STACK_BASE.with(|c| c.get()).wrapping_sub(here);
@@ -684,6 +684,7 @@ impl Evaluator {
 
     /// Expand an `app` node one step: the body/context it denotes, or None if it is a plain value or builtin.
     pub fn expand_app(&self, n: N, ctx: &C) -> R<Expansion> {
+        check_stack()?;
         let (name, args, sel, r) = match &n.e {
             E::App { name, args, sel, r, .. } => (*name, args, sel, r.get()),
             _ => return Ok(None),
@@ -884,6 +885,7 @@ impl Evaluator {
                 if let Some(v) = def.cache.borrow().as_ref() {
                     return Ok(v.clone());
                 }
+                check_stack()?;
                 let (s0, p0) = (self.st_touch.get(), self.pr_touch.get());
                 let v = self.eval(body, &None)?;
                 if self.st_touch.get() == s0 && self.pr_touch.get() == p0 {
@@ -891,6 +893,7 @@ impl Evaluator {
                 }
                 return Ok(v);
             }
+            check_stack()?;
             return self.eval(body, &base);
         }
         let expanded = if def.inst.is_none() {
@@ -1347,7 +1350,7 @@ impl Evaluator {
                         idx.iter().map(|&i| slots[i].take().unwrap()).collect()
                     }
                 };
-                Ok(Value::Record(Rc::new(RecordV { names: sh.names.clone(), vals })))
+                Ok(Value::Record(Rc::new(RecordV::new(sh.names.clone(), vals))))
             }
             E::RecSet(fields) => {
                 let mut idx: Vec<usize> = (0..fields.len()).collect();
@@ -1568,7 +1571,7 @@ impl Evaluator {
                 for x in a {
                     out.push(self.eval(x, ctx)?);
                 }
-                Ok(Value::Tuple(Rc::new(out)))
+                Ok(Value::Tuple(TupleV::rc(out)))
             }
             K::BoxAct => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? || self.unchanged_val(&a[1], ctx)?)),
             K::AngleAct => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? && !self.unchanged_val(&a[1], ctx)?)),
@@ -1603,7 +1606,7 @@ impl Evaluator {
         for a in args {
             t.push(self.eval(a, ctx)?);
         }
-        Ok(Value::Tuple(Rc::new(t)))
+        Ok(Value::Tuple(TupleV::rc(t)))
     }
 
     /// Evaluate in TLC's "keep lazy" mode: a function constructor reached through IF/CASE/LET/definitions is
@@ -1818,7 +1821,7 @@ impl Evaluator {
         }
         fn rec(st: &mut St, i: usize, c: &C) -> R<()> {
             if i == st.sets.len() {
-                st.dom.push(Value::Tuple(Rc::new(st.cur.clone())));
+                st.dom.push(Value::Tuple(TupleV::rc(st.cur.clone())));
                 st.vals.push(st.ev.eval(st.body, c)?);
                 return Ok(());
             }
@@ -1887,13 +1890,14 @@ impl Evaluator {
                 let nv = upd(t[k].clone())?;
                 match Rc::get_mut(&mut t) {
                     Some(v) => {
-                        v[k] = nv;
+                        v.e[k] = nv;
+                        v.h.set(0);
                         Ok(Value::Tuple(t))
                     }
                     None => {
-                        let mut e = (*t).clone();
+                        let mut e = t.e.clone();
                         e[k] = nv;
-                        Ok(Value::Tuple(Rc::new(e)))
+                        Ok(Value::Tuple(TupleV::rc(e)))
                     }
                 }
             }
@@ -1910,12 +1914,13 @@ impl Evaluator {
                 match Rc::get_mut(&mut r) {
                     Some(v) => {
                         v.vals[k] = nv;
+                        v.h.set(0);
                         Ok(Value::Record(r))
                     }
                     None => {
                         let mut vals = r.vals.clone();
                         vals[k] = nv;
-                        Ok(Value::Record(Rc::new(RecordV { names: r.names.clone(), vals })))
+                        Ok(Value::Record(Rc::new(RecordV::new(r.names.clone(), vals))))
                     }
                 }
             }
@@ -1928,12 +1933,13 @@ impl Evaluator {
                 match Rc::get_mut(&mut fc) {
                     Some(v) => {
                         v.vals[k] = nv;
+                        v.h.set(0);
                         Ok(Value::Fcn(fc))
                     }
                     None => {
                         let mut vals = fc.vals.clone();
                         vals[k] = nv;
-                        Ok(Value::Fcn(Rc::new(FcnV { dom: fc.dom.clone(), vals })))
+                        Ok(Value::Fcn(Rc::new(FcnV::new(fc.dom.clone(), vals))))
                     }
                 }
             }
@@ -2370,7 +2376,7 @@ impl Evaluator {
                         for x in args {
                             t.push(self.eval(x, ctx)?);
                         }
-                        Value::Tuple(Rc::new(t))
+                        Value::Tuple(TupleV::rc(t))
                     };
                     let c = lf.bind(self, &arg)?;
                     return self.enumerate(lf.body(), &c, k);

@@ -37,7 +37,8 @@ fn prefix(op: &str) -> Option<(i32, i32)> {
     Some(match op {
         "~" => (4, 4),
         "[]" | "<>" | "ENABLED" | "UNCHANGED" => (4, 15),
-        "SUBSET" | "UNION" | "DOMAIN" => (8, 8),
+        "SUBSET" | "UNION" => (8, 8),
+        "DOMAIN" => (9, 9),
         "-" => (12, 12),
         _ => return None,
     })
@@ -723,6 +724,24 @@ impl Parser {
             if let Some(info) = prefix(&t.v) {
                 self.next()?;
                 let arg = self.parse_bin(info.1 + 1)?;
+                // SANY rejects a prefix operator followed by an infix operator of overlapping precedence
+                // (e.g. `SUBSET S \cup T`, `[]x = 1`): neither grouping is preferred.
+                let nt = self.peek().clone();
+                if nt.t == T::Op {
+                    if let Some((lo2, hi2)) = infix(&nt.v) {
+                        if lo2 <= info.1 && hi2 >= info.0 {
+                            return Err(Box::new(Fail::Tla(TlaError {
+                                msg: format!(
+                                    "***Parse Error***\n  Precedence conflict between ops {} in block line {}, col {} to line {}, col {} of module {} and {}.",
+                                    t.v, t.line, t.col, t.line, t.ec, self.module, nt.v
+                                ),
+                                loc: Some([t.line, t.col, nt.line, nt.ec]),
+                                module: Some(self.module.clone()),
+                                kind: "parse",
+                            })));
+                        }
+                    }
+                }
                 let e = if &*t.v == "-" {
                     self.mk_t(&t, E::App { name: name("-."), args: vec![arg], sel: None, r: Cell::new(Res::None), implicit: false })
                 } else {
@@ -929,7 +948,13 @@ impl Parser {
                 self.next()?;
                 while self.isop("!") {
                     self.next()?;
-                    self.next()?;
+                    // <1>4!1!(v): a selector may carry arguments
+                    if self.isop("(") {
+                        self.next()?;
+                        self.parse_args()?;
+                    } else {
+                        self.next()?;
+                    }
                 }
                 return Ok(self.mk_t(&t, E::StepRef));
             }

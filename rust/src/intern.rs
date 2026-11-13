@@ -56,7 +56,22 @@ thread_local! {
     static MV_TYPES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 /// Type letter of a typed model value ("a_1" has type 'a'); None for untyped ones. Cached per string id.
+thread_local! {
+    static ANY_TYPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Creates (the id of) a model value; remembers whether any typed model value exists, so that the type
+/// checks in comparisons cost nothing in the common untyped case.
+pub fn model_value(name: &str) -> StrId {
+    let b = name.as_bytes();
+    if b.len() > 2 && b[1] == b'_' {
+        ANY_TYPED.with(|c| c.set(true));
+    }
+    str_id(name)
+}
 pub fn model_type(id: StrId) -> Option<u8> {
+    if !ANY_TYPED.with(|c| c.get()) {
+        return None;
+    }
     MV_TYPES.with(|c| {
         let mut c = c.borrow_mut();
         let i = id.0 as usize;

@@ -11,6 +11,15 @@ fn main() {
     let exe = argv.remove(0);
     let exe_name = exe.rsplit('/').next().unwrap_or("").to_string();
     let java = exe_name.starts_with("everystate-java") || exe_name == "java" || argv.first().map(|a| a == "java").unwrap_or(false) && { argv.remove(0); true };
+    if argv.first().map(|a| a == "--ppr").unwrap_or(false) {
+        // test hook: pretty-print the value on stdin at the given width (default 80), as TLC's Values.ppr does
+        use std::io::{Read, Write};
+        let width: i64 = argv.get(1).and_then(|w| w.parse().ok()).unwrap_or(80);
+        let mut input = String::new();
+        let _ = std::io::stdin().read_to_string(&mut input);
+        let _ = std::io::stdout().write_all(everystate::pprint::ppr_width(&input, width).as_bytes());
+        return;
+    }
     // Evaluating deeply recursive TLA+ definitions needs far more stack than the main thread has.
     const STACK: usize = 1 << 30;
     let child = std::thread::Builder::new()

@@ -3,7 +3,7 @@
 use crate::ast::N;
 use crate::eval::{ev, Closure, Ctx, DefRef, Lazy, LazyFcn, StateRef};
 use crate::intern::*;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::cmp::Ordering;
 use std::rc::Rc;
 
@@ -14,7 +14,7 @@ pub enum Value {
     Int(i64),
     Str(StrId),
     Model(StrId),
-    Tuple(Rc<Vec<Value>>),
+    Tuple(Rc<TupleV>),
     Record(Rc<RecordV>),
     Fcn(Rc<FcnV>),
     Set(Rc<SetV>),
@@ -24,11 +24,35 @@ pub enum Value {
     Thunk(Rc<Lazy>),
 }
 
+/// A sequence / tuple. `h` caches the fingerprint hash of the value (0 = not computed yet).
+pub struct TupleV {
+    pub e: Vec<Value>,
+    pub h: Cell<u64>,
+}
+impl TupleV {
+    #[inline]
+    pub fn rc(e: Vec<Value>) -> Rc<TupleV> {
+        Rc::new(TupleV { e, h: Cell::new(0) })
+    }
+}
+impl std::ops::Deref for TupleV {
+    type Target = Vec<Value>;
+    #[inline]
+    fn deref(&self) -> &Vec<Value> {
+        &self.e
+    }
+}
+
 pub struct RecordV {
     pub names: Rc<Vec<StrId>>, // sorted by string id
     pub vals: Vec<Value>,
+    pub h: Cell<u64>,
 }
 impl RecordV {
+    #[inline]
+    pub fn new(names: Rc<Vec<StrId>>, vals: Vec<Value>) -> RecordV {
+        RecordV { names, vals, h: Cell::new(0) }
+    }
     #[inline]
     pub fn get(&self, name: StrId) -> Option<&Value> {
         self.names.iter().position(|n| *n == name).map(|i| &self.vals[i])
@@ -37,6 +61,13 @@ impl RecordV {
 pub struct FcnV {
     pub dom: Rc<Vec<Value>>, // sorted, deduplicated
     pub vals: Vec<Value>,
+    pub h: Cell<u64>,
+}
+impl FcnV {
+    #[inline]
+    pub fn new(dom: Rc<Vec<Value>>, vals: Vec<Value>) -> FcnV {
+        FcnV { dom, vals, h: Cell::new(0) }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -78,10 +109,11 @@ pub struct SetV {
     pub k: SetK,
     cache: OnceCell<Vec<Value>>,
     shape: OnceCell<FcnShape>,
+    h: Cell<u64>,
 }
 
 thread_local! {
-    static EMPTY_TUPLE: Value = Value::Tuple(Rc::new(Vec::new()));
+    static EMPTY_TUPLE: Value = Value::Tuple(TupleV::rc(Vec::new()));
     static EMPTY_SET: Rc<SetV> = Rc::new(SetV::new(SetK::Enum(Vec::new())));
 }
 pub fn empty_tuple() -> Value {
@@ -93,7 +125,7 @@ pub fn empty_set() -> Rc<SetV> {
 
 impl SetV {
     pub fn new(k: SetK) -> SetV {
-        SetV { k, cache: OnceCell::new(), shape: OnceCell::new() }
+        SetV { k, cache: OnceCell::new(), shape: OnceCell::new(), h: Cell::new(0) }
     }
     pub fn of(elems: Vec<Value>) -> Value {
         Value::Set(Rc::new(SetV::new(SetK::Enum(elems))))
@@ -383,7 +415,7 @@ impl SetV {
                 let n = es.len();
                 let mut idx = vec![0usize; n];
                 loop {
-                    out.push(Value::Record(Rc::new(RecordV { names: names.clone(), vals: idx.iter().enumerate().map(|(k, &i)| es[k][i].clone()).collect() })));
+                    out.push(Value::Record(Rc::new(RecordV::new(names.clone(), idx.iter().enumerate().map(|(k, &i)| es[k][i].clone()).collect()))));
                     let mut k = n as isize - 1;
                     while k >= 0 {
                         idx[k as usize] += 1;
@@ -412,7 +444,7 @@ impl SetV {
                 let n = es.len();
                 let mut idx = vec![0usize; n];
                 loop {
-                    out.push(Value::Tuple(Rc::new(idx.iter().enumerate().map(|(k, &i)| es[k][i].clone()).collect())));
+                    out.push(Value::Tuple(TupleV::rc(idx.iter().enumerate().map(|(k, &i)| es[k][i].clone()).collect())));
                     let mut k = n as isize - 1;
                     while k >= 0 {
                         idx[k as usize] += 1;
@@ -495,7 +527,7 @@ impl SetV {
             SetK::Cap(a, b) => format!("{} \\cap {}", fmt_set(a), fmt_set(b)),
             SetK::Diff(a, b) => format!("{} \\ {}", fmt_set(a), fmt_set(b)),
             SetK::Filter(f) => format!("{{x \\in {} : ...}}", fmt_set(&f.s)),
-            SetK::Union(ss) => format!("UNION {{{}}}", ss.iter().map(|x| fmt_set(x)).collect::<Vec<_>>().join(", ")),
+            SetK::Union(_) => "UNION ...".to_string(),
             _ => fmt_set(self),
         }
     }
@@ -850,9 +882,9 @@ impl FcnShape {
     pub fn make(&self, vals: Vec<Value>) -> Value {
         match self {
             FcnShape::Empty => empty_tuple(),
-            FcnShape::Tuple => Value::Tuple(Rc::new(vals)),
-            FcnShape::Record(names) => Value::Record(Rc::new(RecordV { names: names.clone(), vals })),
-            FcnShape::Fcn(dom) => Value::Fcn(Rc::new(FcnV { dom: dom.clone(), vals })),
+            FcnShape::Tuple => Value::Tuple(TupleV::rc(vals)),
+            FcnShape::Record(names) => Value::Record(Rc::new(RecordV::new(names.clone(), vals))),
+            FcnShape::Fcn(dom) => Value::Fcn(Rc::new(FcnV::new(dom.clone(), vals))),
         }
     }
 }
@@ -880,7 +912,7 @@ pub fn make_record(names: &[StrId], vals: Vec<Value>) -> Value {
     let mut idx: Vec<usize> = (0..names.len()).collect();
     idx.sort_by_key(|&i| names[i].0);
     let mut slots: Vec<Option<Value>> = vals.into_iter().map(Some).collect();
-    Value::Record(Rc::new(RecordV { names: Rc::new(idx.iter().map(|&i| names[i]).collect()), vals: idx.iter().map(|&i| slots[i].take().unwrap()).collect() }))
+    Value::Record(Rc::new(RecordV::new(Rc::new(idx.iter().map(|&i| names[i]).collect()), idx.iter().map(|&i| slots[i].take().unwrap()).collect())))
 }
 pub fn is_fcn(v: &Value) -> bool {
     matches!(v, Value::Tuple(_) | Value::Record(_) | Value::Fcn(_))
@@ -928,6 +960,9 @@ impl Hasher {
         let m = ((self.h ^ x) as u128).wrapping_mul(K2 as u128);
         self.h = ((m as u64) ^ ((m >> 64) as u64)).wrapping_add(K1);
     }
+    /// Composite values are hashed once: the result is cached in the value and mixed into the enclosing
+    /// hash as a single word (unchanged parts of a state are shared between states, so most of a state is
+    /// never re-hashed).
     pub fn value(&mut self, v: &Value) -> R<()> {
         match v {
             Value::Int(i) => {
@@ -935,43 +970,71 @@ impl Hasher {
             }
             Value::Bool(b) => self.add(if *b { 3 } else { 2 }),
             Value::Str(s) => self.add(4 ^ ((s.0 as u64) << 4)),
+            Value::Model(m) => self.add(9 ^ ((m.0 as u64) << 4)),
             Value::Tuple(t) => {
-                self.add(5 ^ ((t.len() as u64) << 4));
-                for x in t.iter() {
-                    self.value(x)?;
+                let mut c = t.h.get();
+                if c == 0 {
+                    let mut h = Hasher::new();
+                    h.add(5 ^ ((t.len() as u64) << 4));
+                    for x in t.iter() {
+                        h.value(x)?;
+                    }
+                    c = h.finish();
+                    t.h.set(c);
                 }
+                self.add(c);
             }
             Value::Record(r) => {
-                self.add(6 ^ ((r.names.len() as u64) << 4));
-                for i in 0..r.names.len() {
-                    self.add(r.names[i].0 as u64);
-                    self.value(&r.vals[i])?;
+                let mut c = r.h.get();
+                if c == 0 {
+                    let mut h = Hasher::new();
+                    h.add(6 ^ ((r.names.len() as u64) << 4));
+                    for i in 0..r.names.len() {
+                        h.add(r.names[i].0 as u64);
+                        h.value(&r.vals[i])?;
+                    }
+                    c = h.finish();
+                    r.h.set(c);
                 }
+                self.add(c);
             }
             Value::Set(s) => {
-                if let SetK::Interval(lo, hi) = &s.k {
-                    // same stream as the enumerated set, without materializing it
-                    let n = (hi - lo + 1).max(0);
-                    self.add(7 ^ ((n as u64) << 4));
-                    for i in *lo..=*hi {
-                        self.add(1 ^ ((i as u64) << 4));
+                let mut c = s.h.get();
+                if c == 0 {
+                    let mut h = Hasher::new();
+                    if let SetK::Interval(lo, hi) = &s.k {
+                        // same stream as the enumerated set, without materializing it
+                        let n = (hi - lo + 1).max(0);
+                        h.add(7 ^ ((n as u64) << 4));
+                        for i in *lo..=*hi {
+                            h.add(1 ^ ((i as u64) << 4));
+                        }
+                    } else {
+                        let e = s.elems()?;
+                        h.add(7 ^ ((e.len() as u64) << 4));
+                        for x in e {
+                            h.value(x)?;
+                        }
                     }
-                    return Ok(());
+                    c = h.finish();
+                    s.h.set(c);
                 }
-                let e = s.elems()?;
-                self.add(7 ^ ((e.len() as u64) << 4));
-                for x in e {
-                    self.value(x)?;
-                }
+                self.add(c);
             }
             Value::Fcn(f) => {
-                self.add(8 ^ ((f.dom.len() as u64) << 4));
-                for i in 0..f.dom.len() {
-                    self.value(&f.dom[i])?;
-                    self.value(&f.vals[i])?;
+                let mut c = f.h.get();
+                if c == 0 {
+                    let mut h = Hasher::new();
+                    h.add(8 ^ ((f.dom.len() as u64) << 4));
+                    for i in 0..f.dom.len() {
+                        h.value(&f.dom[i])?;
+                        h.value(&f.vals[i])?;
+                    }
+                    c = h.finish();
+                    f.h.set(c);
                 }
+                self.add(c);
             }
-            Value::Model(m) => self.add(9 ^ ((m.0 as u64) << 4)),
             _ => return eval_err("Attempted to fingerprint a non-value (operator or lazy function).".into()),
         }
         Ok(())
@@ -1006,6 +1069,20 @@ fn fmt_str(s: &str, o: &mut String) {
 }
 fn is_ident(s: &str) -> bool {
     s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') && s.bytes().any(|c| c.is_ascii_alphabetic())
+}
+
+thread_local! {
+    static FMT_ERR: std::cell::RefCell<Option<Box<Fail>>> = const { std::cell::RefCell::new(None) };
+}
+/// Like `fmt`, but reports an error raised while enumerating a lazy set that has to be printed
+/// (the TypeScript `fmt` throws in that case).
+pub fn fmt_checked(v: &Value) -> R<String> {
+    FMT_ERR.with(|c| *c.borrow_mut() = None);
+    let s = fmt(v);
+    match FMT_ERR.with(|c| c.borrow_mut().take()) {
+        Some(e) => Err(e),
+        None => Ok(s),
+    }
 }
 
 pub fn fmt(v: &Value) -> String {
@@ -1088,11 +1165,19 @@ fn fmt_set_into(s: &SetV, o: &mut String) {
         }
         _ => {
             if s.is_derived() && s.enumerable() {
-                if let Ok(e) = s.elems() {
-                    o.push('{');
-                    join(e, ", ", o);
-                    o.push('}');
-                    return;
+                match s.elems() {
+                    Ok(e) => {
+                        o.push('{');
+                        join(e, ", ", o);
+                        o.push('}');
+                        return;
+                    }
+                    Err(e) => FMT_ERR.with(|c| {
+                        let mut c = c.borrow_mut();
+                        if c.is_none() {
+                            *c = Some(e);
+                        }
+                    }),
                 }
             }
             o.push_str(&s.desc());

@@ -19,7 +19,7 @@ fn int(v: &Value, op: &str, i: usize) -> R<i64> {
         _ => fail(format!("The {} argument of {} should be an integer, but instead it is:\n{}", ORD[i], op, fmt(v))),
     }
 }
-fn seq<'a>(v: &'a Value, op: &str, i: usize) -> R<&'a Rc<Vec<Value>>> {
+fn seq<'a>(v: &'a Value, op: &str, i: usize) -> R<&'a Rc<TupleV>> {
     match v {
         Value::Tuple(t) => Ok(t),
         _ => fail(format!("The {} argument of {} should be a sequence, but instead it is:\n{}", ORD[i], op, fmt(v))),
@@ -44,7 +44,7 @@ fn one_arg_err<T>(op: &str, what: &str, v: &Value) -> R<T> {
     fail(format!("The argument of {} should be a {}, but instead it is:\n{}", op, what, fmt(v)))
 }
 fn tuple_of(v: Vec<Value>) -> Value {
-    if v.is_empty() { empty_tuple() } else { Value::Tuple(Rc::new(v)) }
+    if v.is_empty() { empty_tuple() } else { Value::Tuple(TupleV::rc(v)) }
 }
 fn string(id: StrId) -> Rc<str> {
     str_of(id)
@@ -189,14 +189,14 @@ fn random_elem(ev: &Evaluator, x: &SetV) -> R<Value> {
             for c in ss {
                 t.push(random_elem(ev, c)?);
             }
-            Value::Tuple(Rc::new(t))
+            Value::Tuple(TupleV::rc(t))
         }
         SetK::RecSet(names, ss) => {
             let mut t = vec![];
             for c in ss {
                 t.push(random_elem(ev, c)?);
             }
-            Value::Record(Rc::new(RecordV { names: names.clone(), vals: t }))
+            Value::Record(Rc::new(RecordV::new(names.clone(), t)))
         }
         SetK::FcnSet(d, r) => {
             let de = d.elems()?;
@@ -365,14 +365,14 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         let mut v = Vec::with_capacity(x.len() + y.len());
         v.extend_from_slice(x);
         v.extend_from_slice(y);
-        Ok(Value::Tuple(Rc::new(v)))
+        Ok(Value::Tuple(TupleV::rc(v)))
     });
     m.op("Append", 2, |_, a| {
         let s = seq(&a[0], "Append", 0)?;
         let mut v = Vec::with_capacity(s.len() + 1);
         v.extend_from_slice(s);
         v.push(a[1].clone());
-        Ok(Value::Tuple(Rc::new(v)))
+        Ok(Value::Tuple(TupleV::rc(v)))
     });
     m.op("Head", 1, |_, a| {
         let s = seq(&a[0], "Head", 0)?;
@@ -386,7 +386,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         if s.is_empty() {
             return fail("Attempted to apply Tail to the empty sequence.".into());
         }
-        Ok(Value::Tuple(Rc::new(s[1..].to_vec())))
+        Ok(Value::Tuple(TupleV::rc(s[1..].to_vec())))
     });
     m.op("SubSeq", 3, |_, a| {
         if let Value::Str(s) = &a[0] {
@@ -410,7 +410,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 if m < 1 { m } else { n }
             ));
         }
-        Ok(Value::Tuple(Rc::new(s[(m - 1) as usize..n as usize].to_vec())))
+        Ok(Value::Tuple(TupleV::rc(s[(m - 1) as usize..n as usize].to_vec())))
     });
     m.op_ops("SelectSeq", 2, 0b10, |ev, a| {
         let s = seq(&a[0], "SelectSeq", 0)?;
@@ -422,7 +422,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 r => return fail(format!("The second argument of SelectSeq must return a boolean, but it returned:\n{}", fmt(&r))),
             }
         }
-        Ok(Value::Tuple(Rc::new(out)))
+        Ok(Value::Tuple(TupleV::rc(out)))
     });
     let sequences = m.done();
 
@@ -446,11 +446,11 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
 
     let mut m = MB::new("TLC", &[]);
     m.op("Print", 2, |_, a| {
-        print(&format!("{}  {}", fmt(&a[0]), fmt(&a[1])));
+        print(&format!("{}  {}", fmt_checked(&a[0])?, fmt_checked(&a[1])?));
         Ok(a[1].clone())
     });
     m.op("PrintT", 1, |_, a| {
-        print(&fmt(&a[0]));
+        print(&fmt_checked(&a[0])?);
         Ok(Value::Bool(true))
     });
     m.op("Assert", 2, |_, a| match &a[0] {
@@ -458,9 +458,9 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         Value::Bool(false) => err("assert", format!("The first argument of Assert evaluated to FALSE; the second argument was:\n{}", fmt(&a[1]))),
         v => fail(format!("The first argument of Assert should be a boolean, but instead it is:\n{}", fmt(v))),
     });
-    m.op("JavaTime", 0, |_, _| {
-        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        Ok(Value::Int((s & 0x7fffffff) as i64))
+    m.op("JavaTime", 0, |ev, _| {
+        let s = (ev.host.borrow().now_ms() / 1000.0).floor() as i64;
+        Ok(Value::Int(s & 0x7fffffff))
     });
     m.op("TLCGet", 1, |ev, a| {
         ev.st_touch.set(ev.st_touch.get() + 1); // never a constant: definitions using it must not be cached
@@ -476,8 +476,8 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 let mut pairs = vec![];
                 for (k, v) in ev.registers.borrow().iter() {
                     match k {
-                        RegKey::Str(s) if &*key == "all:named" => pairs.push((Value::Str(*s), Value::Tuple(Rc::new(vec![v.clone()])))),
-                        RegKey::Int(i) if &*key == "all" => pairs.push((Value::Int(*i), Value::Tuple(Rc::new(vec![v.clone()])))),
+                        RegKey::Str(s) if &*key == "all:named" => pairs.push((Value::Str(*s), Value::Tuple(TupleV::rc(vec![v.clone()])))),
+                        RegKey::Int(i) if &*key == "all" => pairs.push((Value::Int(*i), Value::Tuple(TupleV::rc(vec![v.clone()])))),
                         _ => {}
                     }
                 }
@@ -566,7 +566,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
             }
             Ok(Ordering::Equal)
         })?;
-        Ok(Value::Tuple(Rc::new(s)))
+        Ok(Value::Tuple(TupleV::rc(s)))
     });
     m.op("RandomElement", 1, |ev, a| {
         let s = set(&a[0], "RandomElement", 0)?.elems()?;
@@ -576,7 +576,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         Ok(s[((ev.random() * s.len() as f64) as usize).min(s.len() - 1)].clone())
     });
     m.val("Any", Value::Set(Rc::new(SetV::new(SetK::Any))));
-    m.op("ToString", 1, |_, a| Ok(mk_str(&fmt(&a[0]))));
+    m.op("ToString", 1, |_, a| Ok(mk_str(&fmt_checked(&a[0])?)));
     m.op("TLCEval", 1, |_, a| Ok(a[0].clone()));
     let tlc = m.done();
 
@@ -607,8 +607,8 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         }
     });
     m.op("TLCModelValue", 1, |_, a| match &a[0] {
-        Value::Str(s) => Ok(Value::Model(*s)),
-        v => Ok(Value::Model(str_id(&fmt(v)))),
+        Value::Str(s) => Ok(Value::Model(model_value(&string(*s)))),
+        v => Ok(Value::Model(model_value(&fmt(v)))),
     });
     m.op("TLCDefer", 1, |_, _| Ok(Value::Bool(true)));
     m.op("PickSuccessor", 1, |_, _| Ok(Value::Bool(true)));
@@ -918,12 +918,13 @@ fn expect_bool(v: Value, i: usize, op: &str, what: &str, test: &Value) -> R<bool
 }
 
 fn read_text(path: &str) -> R<String> {
-    if !std::path::Path::new(path).exists() {
+    let h = crate::eval::ev().host.borrow().clone();
+    if !h.exists(path) {
         return fail(format!("{} (No such file or directory)", path));
     }
-    match std::fs::read(path) {
+    match h.read_file(path) {
         Ok(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
-        Err(e) => fail(format!("{} ({})", path, e)),
+        Err(e) => fail(e),
     }
 }
 
@@ -975,7 +976,7 @@ impl JsonReader {
                 let d = self.at();
                 self.i += 1;
                 if d == Some(']') {
-                    return Ok(Value::Tuple(Rc::new(out)));
+                    return Ok(Value::Tuple(TupleV::rc(out)));
                 }
                 if d != Some(',') {
                     return self.err("expected ',' or ']'");
@@ -1366,7 +1367,7 @@ fn overrides() -> Vec<Ov> {
         let mut out = Vec::with_capacity(s.len() + 1);
         out.push(a[0].clone());
         out.extend_from_slice(s);
-        Ok(Value::Tuple(Rc::new(out)))
+        Ok(Value::Tuple(TupleV::rc(out)))
     }));
     v.push(("SequencesExt", "Front", 0, false, |_, a| {
         if let Value::Str(s) = &a[0] {
@@ -1467,10 +1468,13 @@ fn overrides() -> Vec<Ov> {
         }
         Ok(a[0].clone())
     }));
-    v.push(("IOUtils", "IOEnv", 0, false, |_, _| {
-        let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    v.push(("IOUtils", "IOEnv", 0, false, |ev, _| {
+        let vars: Vec<(String, String)> = ev.host.borrow().env();
         if vars.is_empty() {
             return Ok(empty_tuple());
+        }
+        if vars.len() > 1 {
+            str_id(&vars[1].0);
         }
         let names: Vec<StrId> = vars.iter().map(|(k, _)| str_id(k)).collect();
         Ok(make_record(&names, vars.iter().map(|(_, v)| mk_str(v)).collect()))
@@ -1615,7 +1619,7 @@ fn overrides() -> Vec<Ov> {
 
 /// Replaces the TLA+ definitions of loaded community modules by their native implementations.
 pub fn apply_overrides(loader: &Loader) {
-    for (mname, op, ops, lazy, f) in overrides() {
+    for (mname, op, ops, lazy, f) in overrides().into_iter().chain(crate::community::overrides()) {
         if let Some(m) = loader.modules.get(&name(mname)) {
             if let Some(Sym::Def(d)) = m.syms.get(name(op)) {
                 d.builtin.set(Some(leak(Builtin { f: BFn::Native(f), ops, lazy })));

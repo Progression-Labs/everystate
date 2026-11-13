@@ -215,7 +215,7 @@ impl P {
                 return Ok(match v.as_str() {
                     "TRUE" => Value::Bool(true),
                     "FALSE" => Value::Bool(false),
-                    _ => Value::Model(str_id(&v)),
+                    _ => Value::Model(model_value(&v)),
                 })
             }
             CT::Sym if v == "{" => {

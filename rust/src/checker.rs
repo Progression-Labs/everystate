@@ -126,14 +126,14 @@ pub fn permute(v: &Value, m: &HashMap<StrId, StrId>) -> R<Option<Value>> {
     }
     Ok(match v {
         Value::Model(x) => m.get(x).map(|y| Value::Model(*y)),
-        Value::Tuple(t) => all(t, m)?.map(|e| Value::Tuple(Rc::new(e))),
-        Value::Record(r) => all(&r.vals, m)?.map(|vals| Value::Record(Rc::new(RecordV { names: r.names.clone(), vals }))),
+        Value::Tuple(t) => all(t, m)?.map(|e| Value::Tuple(TupleV::rc(e))),
+        Value::Record(r) => all(&r.vals, m)?.map(|vals| Value::Record(Rc::new(RecordV::new(r.names.clone(), vals)))),
         Value::Fcn(f) => {
             let d = all(&f.dom, m)?;
             let vs = all(&f.vals, m)?;
             match (d, vs) {
                 (None, None) => None,
-                (None, Some(vals)) => Some(Value::Fcn(Rc::new(FcnV { dom: f.dom.clone(), vals }))),
+                (None, Some(vals)) => Some(Value::Fcn(Rc::new(FcnV::new(f.dom.clone(), vals)))),
                 (Some(d), vs) => {
                     let vals = vs.unwrap_or_else(|| f.vals.clone());
                     Some(make_fcn_from_pairs(d.into_iter().zip(vals).collect())?)
@@ -184,6 +184,40 @@ impl<'a> Checker<'a> {
         let ev = model.ev;
         ev.stats.active.set(true);
         ev.stats.check_deadlock.set(opts.check_deadlock);
+        {
+            // TLCGet("spec"): the structure of TLC's record, without coverage statistics (built on demand)
+            type Item = (String, Loc, String);
+            let root = model.root_name.clone();
+            let preds = |ps: &[Pred]| -> Vec<Item> { ps.iter().map(|p| (p.name.clone(), p.e.loc, p.e.module_str().unwrap_or_else(|| root.clone()))).collect() };
+            let cats: Vec<Vec<Item>> = vec![
+                preds(&model.inits),
+                model.actions.iter().map(|a| (a.name.clone(), a.loc, a.module.clone())).collect(),
+                preds(&model.invariants),
+                preds(&model.implied_inits),
+                preds(&model.implied_actions),
+                preds(&model.live_props),
+                preds(&model.fairness),
+                preds(&model.constraints),
+                preds(&model.action_constraints),
+                model.vars.iter().map(|v| (v.name.to_string(), [0; 4], v.module.to_string())).collect(),
+            ];
+            *ev.spec_info.borrow_mut() = Some(Box::new(move || {
+                use crate::stdlib::js_names;
+                let mut sets = vec![];
+                for c in &cats {
+                    let mut items = vec![];
+                    for (nm, loc, module) in c {
+                        let inner = make_record(
+                            &js_names(&["beginLine", "beginColumn", "endLine", "endColumn", "module"]),
+                            vec![Value::Int(loc[0] as i64), Value::Int(loc[1] as i64), Value::Int(loc[2] as i64), Value::Int(loc[3] as i64), Value::Str(str_id(module))],
+                        );
+                        items.push(make_record(&js_names(&["name", "location"]), vec![Value::Str(str_id(nm)), inner]));
+                    }
+                    sets.push(mk_set(items)?);
+                }
+                Ok(make_record(&js_names(&["inits", "actions", "invariants", "impliedinits", "impliedactions", "impliedtemporals", "temporals", "constraints", "actionconstraints", "variables"]), sets))
+            }));
+        }
         Checker {
             model,
             ev,
@@ -578,9 +612,15 @@ impl<'a> Checker<'a> {
         let m = self.model;
         let n = self.nvars;
         let actions = &m.actions;
+        let mut nxt = StateData::blank(n);
         for (ai, a) in actions.iter().enumerate() {
-            let nxt = StateData::blank(n);
-            ev.set_state(s, Some(&nxt));
+            // The buffer is all-unassigned again after an enumeration; reuse it unless a lazy value kept a
+            // reference to it (ours plus the evaluator's make two).
+            if Rc::strong_count(&nxt) > 2 {
+                nxt = StateData::blank(n);
+            }
+            let nxt = &nxt;
+            ev.set_state(s, Some(nxt));
             ev.init_mode.set(false);
             ev.prime_depth.set(0);
             ev.call_depth.set(0);
