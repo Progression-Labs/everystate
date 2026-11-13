@@ -180,7 +180,21 @@ impl SetV {
             }
             SetK::FcnSet(dom, rng) => {
                 let d = match domain_of(v) {
-                    None => return Ok(false),
+                    None => {
+                        return match v {
+                            Value::Model(m) => {
+                                if model_type(*m).is_none() {
+                                    Ok(false)
+                                } else {
+                                    eval_err(format!("Attempted to check if the typed model value {} is an element of\n{}", str_of(*m), fmt_set(self)))
+                                }
+                            }
+                            Value::Set(_) | Value::Int(_) | Value::Bool(_) | Value::Str(_) | Value::Undef => {
+                                eval_err(format!("Attempted to check if \n{}\nwhich is not a TLC function value, is in the set of functions:\n{}", fmt(v), fmt_set(self)))
+                            }
+                            _ => Ok(false),
+                        };
+                    }
                     Some(d) => d,
                 };
                 if !set_eq(&d, dom)? {
@@ -518,6 +532,13 @@ pub fn model_type(id: StrId) -> Option<u8> {
 
 fn model_cmp(m: StrId, o: &Value) -> R<Ordering> {
     if let Value::Model(x) = o {
+        if m != *x {
+            if let (Some(t1), Some(t2)) = (model_type(m), model_type(*x)) {
+                if t1 != t2 {
+                    return eval_err(format!("Attempted to compare the differently-typed model values {} and {}", str_of(m), str_of(*x)));
+                }
+            }
+        }
         return Ok(m.0.cmp(&x.0));
     }
     if model_type(m).is_some() {
@@ -536,6 +557,13 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
         (_, Value::Model(m)) => Ok(model_cmp(*m, a)?.reverse()),
         (Value::Int(_), _) | (Value::Str(_), _) | (Value::Bool(_), _) => cmp_fail(a, b),
         (Value::Set(x), Value::Set(y)) => {
+            if let (SetK::Inf(i), SetK::Inf(j)) = (&x.k, &y.k) {
+                return Ok((*i as u8).cmp(&(*j as u8)));
+            }
+            if matches!(x.k, SetK::Inf(_)) || matches!(y.k, SetK::Inf(_)) {
+                let (u, o) = if matches!(x.k, SetK::Inf(_)) { (x, y) } else { (y, x) };
+                return eval_err(format!("Attempted to compare overridden value {} with non-overridden value:\n{}", fmt_set(u), fmt_set(o)));
+            }
             if Rc::ptr_eq(x, y) {
                 return Ok(Ordering::Equal);
             }

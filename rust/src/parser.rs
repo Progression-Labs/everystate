@@ -1117,6 +1117,7 @@ impl Parser {
                     if self.eat_kw("OTHER")? {
                         self.expect_op("->")?;
                         other = Some(Box::new(self.parse_expr()?));
+                        break; // OTHER is always the last arm; a following [] belongs to an enclosing CASE
                     } else {
                         let c = self.parse_expr()?;
                         self.expect_op("->")?;
@@ -1267,6 +1268,17 @@ impl Parser {
                 }
             }
             self.expect_op("]")?;
+            for (i, f) in fields.iter().enumerate() {
+                if fields[..i].iter().any(|g| g.0 == f.0) {
+                    let l = f.1.loc;
+                    return Err(Box::new(Fail::Tla(TlaError {
+                        msg: format!("line {}, col {} to line {}, col {} of module {}\n\nNon-unique fields in constructor.", l[0], l[1], l[2], l[3], self.module),
+                        loc: Some(l),
+                        module: Some(self.module.clone()),
+                        kind: "semantic",
+                    })));
+                }
+            }
             return Ok(self.mk_t(t, if is_rec { E::Rec(fields, OnceCell::new()) } else { E::RecSet(fields) }));
         }
         // [x \in S |-> e]

@@ -64,7 +64,6 @@ fn canon(s: &str) -> &str {
         "(\\X)" => "\\otimes",
         "\\forall" => "\\A",
         "\\exists" => "\\E",
-        "\\mod" => "%",
         _ => s,
     }
 }
