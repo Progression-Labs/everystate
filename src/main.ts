@@ -328,7 +328,7 @@ function writeDump(model: Model, checker: Checker, dump: { file: string; dot: bo
 
 const USAGE = `everystate ${VERSION} - a TLA+ model checker in pure TypeScript (TLC-compatible command line)
 
-Usage: verify [options] SPEC[.tla]
+Usage: everystate [options] SPEC[.tla]
 
   -config FILE        configuration file (default: SPEC.cfg)
   -deadlock           do not check for deadlock

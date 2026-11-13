@@ -1,125 +1,128 @@
 # everystate
 
-A TLA+ model checker written in pure TypeScript. No Java, no native code, no runtime dependencies.
+A TLA+ model checker with no Java dependency. It reads ordinary `.tla` specs and TLC `.cfg` files,
+checks every reachable state, and reports results in TLC's format.
 
-It reads ordinary TLA+ modules and TLC configuration files, explores the state space the way TLC
-does, and prints results in TLC's format, so tools written against TLC keep working.
+Two engines live in this repo:
+
+| | Status | Use it for |
+|---|---|---|
+| TypeScript (`src/`, npm `everystate`) | complete: safety, liveness, symmetry, TLC-compatible output | today |
+| Rust (`rust/`, crate `everystate`) | safety checking done, about 2x faster; liveness, full CLI and WASM in progress | becoming the main engine |
+
+## Example
+
+`examples/Counter.tla`:
+
+```tla
+---- MODULE Counter ----
+EXTENDS Naturals
+VARIABLE n
+
+Init == n = 0
+Next == n < 5 /\ n' = n + 1
+Spec == Init /\ [][Next]_n
+
+TypeOK   == n \in 0..5
+NeverFour == n /= 4
+====
+```
+
+`examples/Counter.cfg`:
+
+```
+SPECIFICATION Spec
+INVARIANT TypeOK
+INVARIANT NeverFour
+CHECK_DEADLOCK FALSE
+```
 
 ```sh
-npx everystate Spec.tla                 # uses Spec.cfg next to the spec
-npx everystate -config MC.cfg -deadlock Spec.tla
+npx everystate examples/Counter.tla
 ```
 
 ```
-Error: Invariant NotSolved is violated.
+Error: Invariant NeverFour is violated.
 Error: The behavior up to this point is:
 State 1: <Initial predicate>
-/\ big = 0
-/\ small = 0
+n = 0
 
-State 2: <FillBig line 16, col 12 to line 16, col 37 of module DieHard>
-/\ big = 5
-/\ small = 0
+State 2: <Next line 6, col 9 to line 6, col 27 of module Counter>
+n = 1
 ...
-73 states generated, 14 distinct states found, 1 states left on queue.
+State 5: <Next line 6, col 9 to line 6, col 27 of module Counter>
+n = 4
+
+5 states generated, 5 distinct states found, 0 states left on queue.
 ```
 
-Runs on Node 20+ and Bun. It uses only `node:fs`, `node:path`, `node:worker_threads` and
-`node:child_process` in its CLI host; the checker itself (`import { check } from 'everystate'`) needs
-no host APIs at all and runs anywhere JavaScript does.
+Exit status is 12, as with TLC.
 
-## What it does
-
-- **Language**: the full TLA+ expression language as TLC supports it — modules, `EXTENDS`,
-  `INSTANCE ... WITH` (named, parameterised, `LOCAL`, inside `LET`), recursive operators and
-  functions, higher-order operators, `LAMBDA`, `CASE`, `CHOOSE`, `EXCEPT`, junction lists, action
-  operators (`'`, `UNCHANGED`, `ENABLED`, `[A]_v`, `<<A>>_v`, `\cdot`), temporal operators, proofs
-  (parsed and ignored).
-- **Checking**: invariants, deadlock, state and action constraints, `[][A]_v` action properties,
-  refinement (`PROPERTY OtherSpec`), and liveness under weak and strong fairness
-  (`[]<>`, `<>[]`, `~>`, `WF_`, `SF_`) with lasso counterexamples.
-- **Configuration**: `SPECIFICATION`, `INIT`/`NEXT`, `CONSTANT(S)` (values, model values, `<-`
-  substitution), `INVARIANT(S)`, `PROPERTY/PROPERTIES`, `CONSTRAINT(S)`, `ACTION_CONSTRAINT(S)`,
-  `SYMMETRY`, `VIEW`, `CHECK_DEADLOCK`.
-- **Standard modules**, implemented natively: `Naturals`, `Integers`, `Reals` (integers only),
-  `Sequences`, `FiniteSets`, `Bags`, `TLC`, `TLCExt`, `Randomization`.
-- **Community modules**, bundled: `FiniteSetsExt`, `SequencesExt`, `Functions`, `Folds`, `Graphs`,
-  `UndirectedGraphs`, `Relation`, `BagsExt`, `Bitwise`, `Combinatorics`, `Json`, `CSV`, `IOUtils`,
-  `VectorClocks`, `DyadicRationals`, `Statistics`, and the TLAPS library modules (`TLAPS`,
-  `FiniteSetTheorems`, `NaturalsInduction`, ...) so that specs with proofs load.
-- **Output**: TLC's messages, `-tool` framing, exit codes, trace format with action names and
-  source locations, 80-column value wrapping, and `-dump dot,actionlabels`.
-
-## Using it where a tool expects Java + TLC
-
-`everystate-java` accepts the command line of `java -cp tla2tools.jar tlc2.TLC ...` (and of
-`tla2sany.xml.XMLExporter`). Point a TLC-driving script at it instead of a JVM:
+### For scripts and agents
 
 ```sh
-JAVA="$(npm root)/everystate/dist/java.js" TLA2TOOLS=unused  some-tool-that-runs-tlc Spec.tla
+npx everystate -json examples/Counter.tla
 ```
 
-The pstack `statechart` skill script runs unmodified this way.
+```json
+{"status":"invariant","name":"NeverFour","generated":5,"distinct":5,"queue":0,"depth":5,
+ "trace":[{"action":null,"state":{"n":"0"}},{"action":"Next","state":{"n":"1"}}, ...]}
+```
 
-## API
+### From code
 
 ```ts
-import { check, fmt } from 'everystate';
+import { check } from 'everystate';
 
-const { result, model } = check({
-  root: 'Spec',
-  modules: { Spec: tlaSource },         // plus any modules it imports that are not bundled
-  config: 'SPECIFICATION Spec\nINVARIANT TypeOK',
+const { result } = check({
+  root: 'Counter',
+  modules: { Counter: tlaSource },
+  config: 'SPECIFICATION Spec\nINVARIANT NeverFour\nCHECK_DEADLOCK FALSE',
 });
-result.status;      // 'ok' | 'invariant' | 'deadlock' | 'liveness' | 'action-property' | ...
-result.distinct;    // distinct states found
-result.trace;       // counterexample: [{ state, action }]
+result.status;   // 'invariant'
+result.name;     // 'NeverFour'
+result.trace;    // [{ state, action }, ...]
 ```
 
-## How it is verified
+### In place of Java TLC
 
-Real TLC is the specification. Three suites compare against it:
+`everystate-java` accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
+shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
+this way.
 
-| Suite | What is compared | Command |
-|---|---|---|
-| [tlaplus/Examples](https://github.com/tlaplus/Examples) manifest | result kind and exact generated / distinct state counts recorded upstream | `npm run conformance:examples -- /path/to/Examples` |
-| TLC's own `test-model` directory | outcome, state counts and trace length against a live run of `tla2tools.jar` | `npm run conformance:tlc -- /path/to/test-model` |
-| pstack `statechart` corpus | byte-identical charts and reports produced by the real script with everystate standing in for Java | `npm run conformance:statechart -- /path/to/statechart/scripts` |
-
-`npm test` runs the self-contained tests (no Java needed): the checker API, the value
-pretty-printer against 337 outputs recorded from the Java implementation, and the community-module
-operators against fixtures validated with real TLC.
-
-Current results are in [CONFORMANCE.md](CONFORMANCE.md).
-
-## Not supported (yet)
-
-- Simulation / generation mode (`-simulate`, `-generate`), depth-first iterative deepening.
-- Multiple workers, disk-backed state queues and fingerprint sets, checkpointing: everything is in
-  memory, so the practical limit is a few million distinct states.
-- The PlusCal translator (specs that already contain their translation work).
-- Trace-explorer spec generation, the debugger, coverage statistics, Java module overrides.
-- TLAPS proofs are parsed and skipped, not checked.
-
-## Rust port
-
-`rust/` holds `verify-rs`, a Rust port of the safety checker (no liveness, `-tool` or `-dump`),
-built to compare speed. It is about 2x faster than this TypeScript engine on Node and roughly level
-with single-worker Java TLC; see `rust/BENCHMARK.md`. The TypeScript engine is the complete one.
-
-## Layout
+## Options
 
 ```
-src/lexer.ts, parser.ts     TLA+ front end
-src/modules.ts              module loading, name resolution, expression levels
-src/values.ts               values and TLC's ordering
-src/eval.ts                 evaluator and next-state enumeration
-src/stdlib.ts, community.ts native standard and community module operators
-src/model.ts, cfg.ts        configuration -> checkable model
-src/checker.ts, liveness.ts breadth-first search, liveness (tableau + SCC)
-src/main.ts                 CLI, TLC-compatible output, java shim
+everystate [options] SPEC[.tla]
+  -config FILE     configuration file (default: SPEC.cfg)
+  -deadlock        do not check for deadlock
+  -json            one JSON result object
+  -tool            TLC's machine-readable message framing
+  -dump dot,actionlabels FILE   write the state graph
 ```
+
+Exit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error,
+151 config error. Runs on Node 20+ and Bun.
+
+## How it is checked
+
+Real TLC is the reference. Results for the TypeScript engine (details in
+[CONFORMANCE.md](CONFORMANCE.md)):
+
+- [tlaplus/Examples](https://github.com/tlaplus/Examples), models up to 5 s: 122 of 122 match on
+  result and exact state counts. Models up to 120 s: 161 of 164, the rest timed out.
+- TLC's own `test-model` suite, run side by side with `tla2tools.jar`: 377 of 414 match.
+- pstack `statechart` corpus: 33 of 33 outputs byte-identical.
+
+The Rust engine matches the TypeScript one on all 74 non-liveness Examples models up to 5 s.
+Speed comparison: [rust/BENCHMARK.md](rust/BENCHMARK.md).
+
+## Not supported
+
+Simulation mode, multiple workers, disk-backed state storage (everything is in memory, so a few
+million distinct states is the practical limit), the PlusCal translator (already-translated specs
+work), and TLAPS proof checking (proofs are parsed and skipped).
 
 ## License
 
-MIT. Bundled TLA+ library modules keep their own (MIT / BSD) licenses.
+MIT
