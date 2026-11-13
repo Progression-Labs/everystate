@@ -41,7 +41,7 @@ function summarise(r) {
   else if (/Deadlock reached/.test(o)) kind = 'deadlock';
   else if (/Action property .* is violated/.test(o)) kind = 'action-property';
   else if (/Property .* is violated by the initial state/.test(o)) kind = 'implied-init';
-  else if (/Temporal propert(ies were|y .* was) violated/.test(o)) kind = 'liveness';
+  else if (/Temporal propert(ies|y) .*(were|was) violated/.test(o)) kind = 'liveness';
   else if (/Assumption .* is false/.test(o)) kind = 'assumption';
   else if (/not completely specified/.test(o)) kind = 'incomplete';
   else if (/Parsing or semantic analysis failed|Fatal errors while parsing|\*\*\* Errors:/.test(o)) kind = 'parse-error';
@@ -66,7 +66,7 @@ async function worker() {
       cache[key] = ref;
       if (cacheFile) fs.writeFileSync(cacheFile, JSON.stringify(cache));
     }
-    const alt = process.env.EVERYSTATE_CMD; // alternative engine with the same command line (e.g. the Rust binary)
+    const alt = process.env.EVERYSTATE_CMD ?? (fs.existsSync(cli) ? undefined : path.resolve(import.meta.dirname, '../rust/target/release/everystate')); // the Rust binary when the TypeScript engine is absent; // alternative engine with the same command line (e.g. the Rust binary)
     const r = alt ? await run(alt, ['-config', path.basename(c.cfg), path.basename(c.spec)], dir)
       : await run(process.execPath, ['--experimental-strip-types', '--no-warnings', '--stack-size=30000', '--max-old-space-size=3000', cli, '-config', path.basename(c.cfg), path.basename(c.spec)], dir);
     const mine = summarise(r);

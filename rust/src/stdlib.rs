@@ -889,7 +889,7 @@ fn tlc_get(ev: &Evaluator, k: &str) -> Option<Value> {
         }
         _ => {
             if k.starts_with("-D") {
-                mk_str(if k.ends_with(".cdot") { "true" } else { "false" })
+                mk_str(if k.ends_with(".cdot") && crate::eval::cdot_enabled() { "true" } else { "false" })
             } else {
                 return None;
             }
@@ -1207,7 +1207,7 @@ fn overrides() -> Vec<Ov> {
         if k < 0 {
             return Ok(Value::Set(empty_set()));
         }
-        if k == 0 {
+        if k == 0 && base.enumerable() {
             return Ok(SetV::of(vec![Value::Set(empty_set())]));
         }
         if !base.enumerable() {
@@ -1216,6 +1216,14 @@ fn overrides() -> Vec<Ov> {
         let b = base.elems()?;
         if k as usize > b.len() {
             return Ok(Value::Set(empty_set()));
+        }
+        // TLC keeps kSubset symbolic; do the same when there are too many subsets to enumerate eagerly
+        let mut count: u128 = 1;
+        for i in 0..(k as u128).min(b.len() as u128 - k as u128) {
+            count = count * (b.len() as u128 - i) / (i + 1);
+            if count.saturating_mul(k as u128) > 4_000_000 {
+                return Ok(Value::Set(Rc::new(SetV::new(SetK::KSubset(k, base.clone())))));
+            }
         }
         let mut out = vec![];
         let mut idx: Vec<usize> = vec![];
