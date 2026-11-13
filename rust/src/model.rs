@@ -24,6 +24,7 @@ pub struct Action {
     pub ctx: C,
 }
 pub struct PostCond {
+    pub possible: bool,
     pub pred: Pred,
     pub loc: Loc,
     pub module: String,
@@ -45,6 +46,7 @@ pub struct Model {
     pub live_props: Vec<Pred>,
     pub symmetry: Option<Vec<HashMap<StrId, StrId>>>,
     pub view: Option<Pred>,
+    pub alias: Option<Pred>,
     pub postconditions: Vec<PostCond>,
     pub check_deadlock: bool,
 }
@@ -55,6 +57,22 @@ fn config_err<T>(msg: String) -> R<T> {
 
 pub fn loc_str(loc: &Loc, module: &str) -> String {
     format!("line {}, col {} to line {}, col {} of module {}", loc[0], loc[1], loc[2], loc[3], module)
+}
+
+fn body_loc(d: Sym) -> (Loc, String) {
+    match d {
+        Sym::Def(dd) => {
+            let mut o = dd.resolved();
+            while let Some(inst) = &o.inst {
+                o = inst.orig;
+            }
+            match o.body.get() {
+                Some(bd) => (bd.loc, bd.module.get().unwrap_or(o.module).to_string()),
+                None => (o.loc, o.module.to_string()),
+            }
+        }
+        Sym::Decl(dd) => ([0; 4], dd.module.to_string()),
+    }
 }
 
 fn mk_app(nm: &str, sym: Sym) -> N {
@@ -387,9 +405,79 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
             }
         }
     }
+    // A constant replaced by a definition that is not constant-level (TLC evaluates the replacement at startup).
+    for c in &cfg.constants {
+        let sub = match &c.subst {
+            Some(s) => s,
+            None => continue,
+        };
+        let scope = match &c.module {
+            Some(m) => loader.modules.get(&name(m)).cloned(),
+            None => Some(root.clone()),
+        };
+        let sd = match scope.and_then(|sc| sc.syms.get(name(&c.name))) {
+            Some(Sym::Decl(d)) if !d.is_var => match d.subst.get() {
+                Some(sd) if sd.params.is_empty() && sd.builtin.get().is_none() => sd,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let s0 = ev.st_touch.get();
+        ev.set_state(&StateData::blank(0), None);
+        ev.init_mode.set(false);
+        if let Err(e) = ev.eval(mk_app(sub, Sym::Def(sd)), &None) {
+            match &*e {
+                Fail::Tla(t) if t.kind == "stack" => continue,
+                Fail::Tla(t) => {
+                    if def_level(sd) > 0 || ev.st_touch.get() != s0 {
+                        return config_err(format!("The configuration file substitutes constant {} with non-constant {} - specifically: {}", c.name, sub, t.msg));
+                    }
+                }
+                _ => return Err(e),
+            }
+        }
+    }
     for c in &root.consts {
         if c.value.borrow().is_none() && c.subst.get().is_none() {
             return config_err(format!("The constant parameter {} is not assigned a value by the configuration file.", c.name));
+        }
+    }
+
+    // SANY's level check: a temporal operator may not be applied to an action (no "raw TLA")
+    {
+        let mut errs: Vec<String> = vec![];
+        fn walk(x: N, root_name: &str, errs: &mut Vec<String>) {
+            if let E::Op(K::Always | K::Eventually | K::LeadsTo | K::Guarantee, a) = &x.e {
+                for arg in a {
+                    if !arg.is_k(K::BoxAct) && !arg.is_k(K::AngleAct) && level_of(arg) == 2 {
+                        let l = arg.loc;
+                        errs.push(format!(
+                            "line {}, col {} to line {}, col {} of module {}\n\nAction used where only temporal formula or state predicate allowed.",
+                            l[0],
+                            l[1],
+                            l[2],
+                            l[3],
+                            arg.module_str().unwrap_or_else(|| root_name.to_string())
+                        ));
+                    }
+                }
+            }
+            for_children(x, &mut |c| walk(c, root_name, errs));
+        }
+        for mname in &loader.load_order {
+            for d in &loader.modules[mname].own_defs {
+                if let Some(b) = d.body.get() {
+                    walk(b, root_name, &mut errs);
+                }
+            }
+        }
+        if !errs.is_empty() {
+            return Err(Box::new(Fail::Tla(TlaError {
+                msg: format!("Semantic errors:\n\n*** Errors: {}\n\n{}", errs.len(), errs.join("\n\n\n")),
+                loc: None,
+                module: Some(root_name.to_string()),
+                kind: "semantic",
+            })));
         }
     }
 
@@ -421,28 +509,50 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
         Some(v) => Some(Pred { name: v.clone(), e: mk_app(v, get_def(v, "view")?), ctx: None }),
         None => None,
     };
-    if let Some(a) = &cfg.alias {
-        get_def(a, "alias")?;
-    }
+    let alias = match &cfg.alias {
+        Some(a) => Some(Pred { name: a.clone(), e: mk_app(a, get_def(a, "alias")?), ctx: None }),
+        None => None,
+    };
     for n in &cfg.postconditions {
         let d = get_def(n, "post condition")?;
-        let (loc, module) = match d {
-            Sym::Def(dd) => {
-                let mut o = dd.resolved();
-                while let Some(inst) = &o.inst {
-                    o = inst.orig;
-                }
-                match o.body.get() {
-                    Some(bd) => (bd.loc, bd.module.get().unwrap_or(o.module).to_string()),
-                    None => (o.loc, o.module.to_string()),
-                }
-            }
-            Sym::Decl(dd) => ([0; 4], dd.module.to_string()),
-        };
-        postconditions.push(PostCond { pred: Pred { name: n.clone(), e: mk_app(n, d), ctx: None }, loc, module });
+        let (loc, module) = body_loc(d);
+        postconditions.push(PostCond { possible: false, pred: Pred { name: n.clone(), e: mk_app(n, d), ctx: None }, loc, module });
     }
+    // _POSSIBLE P: count how often P holds (state predicates: per generated state; actions: per transition) and
+    // require a non-zero count once model checking has finished.
     if !cfg.possible.is_empty() {
-        return config_err("The _POSSIBLE configuration keyword is not supported by verify-rs.".into());
+        let pm = loader.load(name("_Possible"), None)?;
+        let (track, check) = match (pm.syms.get(name("_Track")), pm.syms.get(name("_CheckName"))) {
+            (Some(Sym::Def(t)), Some(Sym::Def(c))) => (t, c),
+            _ => unreachable!(),
+        };
+        let strn = |v: &str| -> Node { Node::new([0; 4], E::Str(Rc::from(v), Cell::new(None))) };
+        for n in &cfg.possible {
+            let sd = match root.syms.get(name(n)) {
+                None => return config_err(format!("The possible {} specified in the configuration file\nis not defined in the specification.", n)),
+                Some(Sym::Def(d)) => d,
+                Some(_) => return config_err(format!("The possible {} specified in the configuration file\nis not a defined operator.", n)),
+            };
+            if !sd.params.is_empty() {
+                return config_err(format!("The possible {} specified in the configuration file\nrequires arguments.", n));
+            }
+            let lv = def_level(sd);
+            if lv >= 3 {
+                return config_err(format!("The possible {} specified in the configuration file\nis a temporal formula; only state- and action-level predicates are supported.", n));
+            }
+            str_id(n);
+            let arg0 = Node::new(sd.loc, E::App { name: name(n), args: vec![], sel: None, r: Cell::new(Res::Def(sd)), implicit: false });
+            let e: N = leak(Node::new(sd.loc, E::App { name: name("_Track"), args: vec![arg0, strn(n)], sel: None, r: Cell::new(Res::Def(track)), implicit: false }));
+            let p = Pred { name: n.clone(), e, ctx: None };
+            if lv <= 1 {
+                constraints.push(p);
+            } else {
+                action_constraints.push(p);
+            }
+            let ce: N = leak(Node::new(sd.loc, E::App { name: name("_CheckName"), args: vec![strn(n)], sel: None, r: Cell::new(Res::Def(check)), implicit: false }));
+            let (loc, module) = body_loc(Sym::Def(sd));
+            postconditions.push(PostCond { possible: true, pred: Pred { name: n.clone(), e: ce, ctx: None }, loc, module });
+        }
     }
 
     // ---- behaviour spec ----
@@ -462,7 +572,12 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
             b.next_pred = Some((mk_app(nx, d), None, nx.clone()));
         }
     }
-    let no_behavior = cfg.spec.is_none() && cfg.init.is_none() && cfg.next.is_none();
+    // a specification without variables has no behaviours to explore: TLC only checks the assumptions
+    if vars.is_empty() {
+        b.inits.clear();
+        b.next_pred = None;
+    }
+    let no_behavior = (cfg.spec.is_none() && cfg.init.is_none() && cfg.next.is_none()) || vars.is_empty();
     if b.inits.is_empty() && !no_behavior {
         return config_err("The configuration file did not specify the initial state predicate.".into());
     }
@@ -571,6 +686,7 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
         live_props: b.live_props,
         symmetry,
         view,
+        alias,
         postconditions,
         check_deadlock: cfg.check_deadlock.unwrap_or(true),
     })

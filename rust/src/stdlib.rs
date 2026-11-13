@@ -113,7 +113,15 @@ pub fn global_defs() -> OrdMap {
 }
 
 fn print(s: &str) {
-    println!("{}", s);
+    crate::eval::ev().host.borrow().print(&format!("{}\n", s));
+}
+/// Interns record field names in the order V8's insertion sort first compares them inside makeRecord
+/// (second name, first name, then the rest), so that fresh names get the same relative string order.
+pub fn js_names(names: &[&str]) -> Vec<StrId> {
+    if names.len() > 1 {
+        str_id(names[1]);
+    }
+    names.iter().map(|n| str_id(n)).collect()
 }
 
 fn bag_pairs<'a>(b: &'a Value, op: &str) -> R<(std::borrow::Cow<'a, [Value]>, &'a [Value])> {
@@ -127,6 +135,9 @@ fn bag_n(v: &Value) -> i64 {
         Value::Int(i) => *i,
         _ => 0,
     }
+}
+fn possible_counts(ev: &Evaluator) -> Value {
+    ev.registers.borrow().get(&RegKey::Str(str_id("s:_possible"))).cloned().unwrap_or_else(empty_tuple)
 }
 fn bag_add(x: i64, y: i64) -> R<i64> {
     let r = x + y;
@@ -793,8 +804,55 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     m.op("TestRandomSetOfSubsets", 3, |_, _| Ok(Value::Bool(true)));
     let randomization = m.done();
 
+    // ---- _Possible (support module of the _POSSIBLE config keyword) ----
+    let mut m = MB::new("_Possible", &[]);
+    m.op("_Track", 2, |ev, a| {
+        let hit_now = match &a[0] {
+            Value::Bool(b) => *b,
+            v => return fail(format!("Attempted to evaluate an expression of form IF P THEN ... ELSE ..., but P was the non-boolean value:\n{}", fmt(v))),
+        };
+        let old = possible_counts(ev);
+        let (d, v) = (domain_elems(&old)?, fcn_values(&old)?);
+        let mut pairs: Vec<(Value, Value)> = d.iter().cloned().zip(v.iter().cloned()).collect();
+        let mut found = false;
+        for p in pairs.iter_mut() {
+            if matches!((&p.0, &a[1]), (Value::Str(x), Value::Str(y)) if x == y) {
+                found = true;
+                if hit_now {
+                    p.1 = Value::Int(bag_n(&p.1) + 1);
+                }
+            }
+        }
+        if !found {
+            pairs.push((a[1].clone(), Value::Int(if hit_now { 1 } else { 0 })));
+        }
+        let nv = make_fcn_from_pairs(pairs)?;
+        ev.registers.borrow_mut().insert(RegKey::Str(str_id("s:_possible")), nv);
+        Ok(Value::Bool(true))
+    });
+    m.op("_Counts", 0, |ev, _| {
+        ev.st_touch.set(ev.st_touch.get() + 1);
+        Ok(possible_counts(ev))
+    });
+    m.op("_CheckName", 1, |ev, a| {
+        let c = possible_counts(ev);
+        let (d, v) = (domain_elems(&c)?, fcn_values(&c)?);
+        for i in 0..d.len() {
+            if matches!((&d[i], &a[0]), (Value::Str(x), Value::Str(y)) if x == y) && !matches!(v[i], Value::Int(0)) {
+                return Ok(Value::Bool(true));
+            }
+        }
+        print(&fmt(&c));
+        Ok(Value::Bool(false))
+    });
+    m.op("_PrintCounts", 0, |ev, _| {
+        print(&fmt(&possible_counts(ev)));
+        Ok(Value::Bool(true))
+    });
+    let possible = m.done();
+
     let mut out = HashMap::new();
-    for x in [naturals, integers, reals, sequences, finite_sets, tlc, tlcext, bags, randomization] {
+    for x in [naturals, integers, reals, sequences, finite_sets, tlc, tlcext, bags, randomization, possible] {
         out.insert(x.name.unwrap(), x);
     }
     out
@@ -805,7 +863,7 @@ fn tlc_get(ev: &Evaluator, k: &str) -> Option<Value> {
     if !st.active.get() {
         return None;
     }
-    let ids = |names: &[&str]| -> Vec<StrId> { names.iter().map(|n| str_id(n)).collect() };
+    let ids = |names: &[&str]| -> Vec<StrId> { js_names(names) };
     Some(match k {
         "level" => Value::Int(st.level.get() + if ev.prime_depth.get() > 0 { 1 } else { 0 }),
         "distinct" => Value::Int(st.distinct.get()),
@@ -821,6 +879,14 @@ fn tlc_get(ev: &Evaluator, k: &str) -> Option<Value> {
             &ids(&["distinct", "generated", "queue", "diameter", "duration"]),
             vec![Value::Int(st.distinct.get()), Value::Int(st.generated.get()), Value::Int(st.queue.get()), Value::Int(st.diameter.get()), Value::Int(0)],
         ),
+        "revision" => make_record(&ids(&["tag", "count", "timestamp", "date", "calver"]), vec![mk_str("development"), Value::Int(0), Value::Int(0), mk_str(""), mk_str("everystate")]),
+        "spec" => {
+            let f = ev.spec_info.borrow();
+            match f.as_ref() {
+                Some(f) => return f().ok(),
+                None => return None,
+            }
+        }
         _ => {
             if k.starts_with("-D") {
                 mk_str(if k.ends_with(".cdot") { "true" } else { "false" })
