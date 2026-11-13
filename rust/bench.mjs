@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Head-to-head benchmark: verify-rs (Rust) vs the TypeScript implementation (Node and Bun) vs Java TLC,
+// Head-to-head benchmark: everystate (Rust, native and WebAssembly) vs the TypeScript implementation (Node and Bun) vs Java TLC,
 // all single-threaded, on a fixed list of safety-only models from tlaplus/Examples.
 //
 // usage: node rust/bench.mjs [--runs 3] [--only substring] [--skip tlc,bun] [--timeout 900]
@@ -13,10 +13,11 @@ import { spawnSync } from 'node:child_process';
 
 const here = import.meta.dirname;
 const EXAMPLES = process.env.EXAMPLES ?? '/home/user/refs/Examples';
-const TS_CLI = process.env.TS_CLI ?? '/home/user/refs/ts-snapshot/src/cli.ts';
+const TS_CLI = process.env.TS_CLI ?? path.resolve(here, '../src/cli.ts');
 const TLA2TOOLS = process.env.TLA2TOOLS ?? '/home/user/refs/tla2tools.jar';
 const TLA_LIBRARY = process.env.TLA_LIBRARY ?? '/home/user/refs/tlapm/library:/home/user/refs/CommunityModules/modules';
-const RS = path.join(here, 'target/release/verify-rs');
+const RS = path.join(here, 'target/release/everystate');
+const WASM_CLI = path.join(here, 'wasm/cli.mjs');
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
@@ -51,6 +52,7 @@ const lastJson = s => { try { return JSON.parse(s.trim().split('\n').pop()); } c
 
 const engines = {
   rust: (cfg, spec) => { const r = timed(RS, ['-json', '-config', cfg, spec], { cwd: EXAMPLES }); const j = lastJson(r.stdout); return { ...r, generated: j?.generated, distinct: j?.distinct, status: j?.status }; },
+  wasm: (cfg, spec) => { const r = timed('node', [WASM_CLI, '-config', cfg, spec], { cwd: EXAMPLES }); const j = lastJson(r.stdout); return { ...r, generated: j?.generated, distinct: j?.distinct, status: j?.status }; },
   node: (cfg, spec) => { const r = timed('node', ['--experimental-strip-types', '--no-warnings', TS_CLI, '-json', '-config', cfg, spec], { cwd: EXAMPLES }); const j = lastJson(r.stdout); return { ...r, generated: j?.generated, distinct: j?.distinct, status: j?.status }; },
   bun: (cfg, spec) => { const r = timed('bun', [TS_CLI, '-json', '-config', cfg, spec], { cwd: EXAMPLES }); const j = lastJson(r.stdout); return { ...r, generated: j?.generated, distinct: j?.distinct, status: j?.status }; },
   tlc: (cfg, spec) => {
@@ -102,7 +104,7 @@ for (const [cfg, spec, note] of MODELS) {
 }
 
 const names = Object.keys(engines);
-const label = { rust: 'Rust', node: 'TS/Node', bun: 'TS/Bun', tlc: 'TLC (1 worker)' };
+const label = { rust: 'Rust', wasm: 'Rust/WASM (Node)', node: 'TS/Node', bun: 'TS/Bun', tlc: 'TLC (1 worker)' };
 let md = `| model | distinct | generated | ${names.map(n => label[n] + ' s').join(' | ')} | Rust states/s | TS/Node states/s | TLC states/s | Rust vs Node | Rust vs Bun | Rust vs TLC | RSS Rust MB | RSS Node MB | counts agree |\n`;
 md += `|---|---:|---:|${names.map(() => '---:').join('|')}|---:|---:|---:|---:|---:|---:|---:|---:|---|\n`;
 for (const r of rows) {
