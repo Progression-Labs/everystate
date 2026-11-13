@@ -134,6 +134,29 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
     }
   }
 
+  // SANY's level check: a temporal operator may not be applied to an action (no "raw TLA")
+  {
+    const errs: string[] = [];
+    const walk = (x: any): void => {
+      if (!x || typeof x !== 'object') return;
+      if (Array.isArray(x)) { for (const y of x) walk(y); return; }
+      if ((x.k === 'always' || x.k === 'eventually' || x.k === 'leadsto' || x.k === 'guarantee') && x.loc) {
+        for (const a of x.a as Node[]) {
+          if (a.k !== 'boxact' && a.k !== 'angleact' && levelOf(a) === 2) {
+            errs.push(`line ${a.loc[0]}, col ${a.loc[1]} to line ${a.loc[2]}, col ${a.loc[3]} of module ${a.mod ?? rootName}\n\nAction used where only temporal formula or state predicate allowed.`);
+          }
+        }
+      }
+      for (const key in x) {
+        if (key === 'r' || key === 'loc' || key === 'instDefs' || key === 'ld') continue;
+        const v = x[key];
+        if (v && typeof v === 'object') walk(v);
+      }
+    };
+    for (const name of loader.loadOrder) for (const d of loader.modules.get(name)!.ownDefs) if (d.body) walk(d.body);
+    if (errs.length) throw new TlaError(`Semantic errors:\n\n*** Errors: ${errs.length}\n\n${errs.join('\n\n\n')}`, undefined, rootName, 'semantic');
+  }
+
   const model: Model = {
     rootName, root, loader, ev, vars, inits: [], actions: [], invariants: [], impliedInits: [], impliedActions: [],
     constraints: [], actionConstraints: [], fairness: [], liveProps: [], symmetry: null, view: null, alias: null,

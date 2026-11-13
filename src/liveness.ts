@@ -36,8 +36,11 @@ function mkJunc(t: 'and' | 'or', items: LE[]): LE {
   if (out.length === 1) return out[0];
   return { t, lvl: Math.max(...out.map(x => x.lvl)), as: out };
 }
-const mkAlways = (a: LE): LE => a.t === 'bool' ? a : { t: 'always', lvl: 3, a };
-const mkEventually = (a: LE): LE => a.t === 'bool' ? a : { t: 'eventually', lvl: 3, a };
+// TLC does not fold constants through temporal operators when it decides whether a property is a tautology
+// ([]TRUE stays a temporal formula); `foldTemporal` is switched off for that test only.
+let foldTemporal = true;
+const mkAlways = (a: LE): LE => a.t === 'bool' && foldTemporal ? a : { t: 'always', lvl: 3, a };
+const mkEventually = (a: LE): LE => a.t === 'bool' && foldTemporal ? a : { t: 'eventually', lvl: 3, a };
 
 export class Liveness {
   model: Model;
@@ -272,8 +275,16 @@ export class Liveness {
       if (!g) { g = { tf, pems: [] }; groups.set(k, g); }
       g.pems.push(pem);
     }
+    if (groups.size === 0) {
+      foldTemporal = false;
+      try {
+        const f2 = mkJunc('and', [mkJunc('and', m.fairness.map(f => this.toLive(f.e, f.ctx))), mkJunc('or', m.liveProps.map(p => mkNot(this.toLive(p.e, p.ctx))))]);
+        this.tautology = f2.t === 'bool' && f2.v === false;
+      } finally { foldTemporal = true; }
+    }
     return groups.size;
   }
+  tautology = false;
 
   check(): CheckResult | null {
     if (!this.groups) this.prepare();
@@ -612,7 +623,7 @@ export function modelCheck(model: Model, opts: CheckOptions): { result: CheckRes
       if (!(e instanceof TlaError)) throw e;
       return { result: checker.result('error', { message: e.message, printSummary: false }), checker };
     }
-    if (branches === 0) {
+    if (branches === 0 && live.tautology) {
       return { result: checker.result('error', { code: 2253, message: 'Temporal formula is a tautology (its negation is unsatisfiable).', printSummary: false }), checker };
     }
     opts.onLiveness?.('branches', branches);

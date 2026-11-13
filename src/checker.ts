@@ -138,6 +138,17 @@ export class Checker {
       case 'stats': return makeRecord(['distinct', 'generated', 'queue', 'diameter', 'duration'],
         [this.states.length, this.generated, this.states.length - this.head, this.depth, 0]);
     }
+    if (k === 'revision') return makeRecord(['tag', 'count', 'timestamp', 'date', 'calver'], ['development', 0, 0, '', 'verify.js']);
+    if (k === 'spec') {
+      // structure of TLC's TLCGet("spec"), without coverage statistics
+      const m = this.model;
+      const item = (name: string, loc: number[] | undefined, module: string | undefined): Value => makeRecord(['name', 'location'], [name,
+        makeRecord(['beginLine', 'beginColumn', 'endLine', 'endColumn', 'module'], [loc?.[0] ?? 0, loc?.[1] ?? 0, loc?.[2] ?? 0, loc?.[3] ?? 0, module ?? m.rootName])]);
+      const preds = (ps: Pred[]): Value => mkSet(ps.map(p => item(p.name, p.e.loc, p.e.mod)));
+      return makeRecord(['inits', 'actions', 'invariants', 'impliedinits', 'impliedactions', 'impliedtemporals', 'temporals', 'constraints', 'actionconstraints', 'variables'],
+        [preds(m.inits), mkSet(m.actions.map(a => item(a.name, a.loc, a.module))), preds(m.invariants), preds(m.impliedInits), preds(m.impliedActions),
+          preds(m.liveProps), preds(m.fairness), preds(m.constraints), preds(m.actionConstraints), mkSet(m.vars.map(v => item(v.name, undefined, v.module)))]);
+    }
     if (k.startsWith('-D')) return k.endsWith('.cdot') ? 'true' : 'false';
     return undefined;
   }
