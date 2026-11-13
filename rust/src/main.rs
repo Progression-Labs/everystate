@@ -13,6 +13,9 @@ mod stdlib;
 mod value;
 
 use intern::*;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::path::{Path, PathBuf};
 
 fn json_str(s: &str, o: &mut String) {

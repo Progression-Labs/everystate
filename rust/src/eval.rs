@@ -281,6 +281,23 @@ fn check_stack() -> R<()> {
     Ok(())
 }
 
+fn captures_ctx(v: &Value) -> bool {
+    fn set(s: &SetV) -> bool {
+        match &s.k {
+            SetK::Filter(_) => true,
+            SetK::Cup(a, b) | SetK::Cap(a, b) | SetK::Diff(a, b) | SetK::FcnSet(a, b) => set(a) || set(b),
+            SetK::Subset(a) | SetK::Seq(a) | SetK::KSubset(_, a) => set(a),
+            SetK::RecSet(_, ss) | SetK::Cross(ss) => ss.iter().any(|x| set(x)),
+            _ => false,
+        }
+    }
+    match v {
+        Value::Closure(_) | Value::LazyFcn(_) | Value::DefRef(_) => true,
+        Value::Set(s) => set(s),
+        _ => false,
+    }
+}
+
 pub fn ev() -> &'static Evaluator {
     EV.with(|e| e.get()).expect("evaluator not initialised")
 }
@@ -486,7 +503,16 @@ impl Evaluator {
     }
     fn force_let(&self, node: &Rc<Ctx>, head: Rc<Ctx>) -> R<Value> {
         match &node.val {
-            Bind::LetLazy { body, v, st } => self.force_cell(body, &Some(head), v, st),
+            Bind::LetLazy { body, v, st } => {
+                let val = self.force_cell(body, &Some(head), v, st)?;
+                // A value that captures its context (lazy set, closure, lazy function) must not be cached in a
+                // cell of that very context: the reference cycle would never be freed.
+                if captures_ctx(&val) && st.get() != 0 {
+                    st.set(0);
+                    *v.borrow_mut() = Value::Undef;
+                }
+                Ok(val)
+            }
             _ => unreachable!(),
         }
     }
@@ -797,8 +823,22 @@ impl Evaluator {
             }
             return self.eval(body, &base);
         }
-        let thunks = self.mk_args(args, ctx)?;
-        let (body, c) = match self.expand_def(def, &thunks, &base)? {
+        let expanded = if def.inst.is_none() {
+            // common case: bind the parameters directly, without an intermediate argument vector
+            let ps = &def.params;
+            if ps.len() != args.len() {
+                return eval_err(format!("The operator {} expects {} arguments but was given {}.", def.name, ps.len(), args.len()));
+            }
+            let mut c = base;
+            for i in 0..ps.len() {
+                c = cons(ps[i].name, self.mk_arg(&args[i], ctx)?, &c);
+            }
+            Some((def.body.get().unwrap(), c))
+        } else {
+            let thunks = self.mk_args(args, ctx)?;
+            self.expand_def(def, &thunks, &base)?
+        };
+        let (body, c) = match expanded {
             Some(x) => x,
             None => {
                 // instance of a builtin operator
@@ -823,6 +863,7 @@ impl Evaluator {
         Ok(v)
     }
 
+    #[inline]
     pub fn eval_app(&self, n: N, ctx: &C) -> R<Value> {
         let (name, args, sel, r) = match &n.e {
             E::App { name, args, sel, r, .. } => (*name, &args[..], sel, r.get()),
@@ -927,6 +968,7 @@ impl Evaluator {
     }
 
     // ---------- evaluation ----------
+    #[inline]
     pub fn eval_bool(&self, n: N, ctx: &C) -> R<bool> {
         match self.eval(n, ctx)? {
             Value::Bool(b) => Ok(b),
@@ -1062,7 +1104,61 @@ impl Evaluator {
         }
     }
 
+    #[inline(never)]
     pub fn eval(&self, n: N, ctx: &C) -> R<Value> {
+        match &n.e {
+            E::App { .. } => self.eval_app_forced(n, ctx),
+            E::Op(k, a) => self.eval_op_fast(n, *k, a, ctx),
+            E::Num(v) => Ok(Value::Int(*v)),
+            E::Bool(b) => Ok(Value::Bool(*b)),
+            _ => self.eval_slow(n, ctx),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_app_forced(&self, n: N, ctx: &C) -> R<Value> {
+        let v = self.eval_app(n, ctx)?;
+        if let Value::LazyFcn(f) = &v {
+            return f.force(self);
+        }
+        Ok(v)
+    }
+
+    #[inline(never)]
+    fn eval_op_fast(&self, n: N, k: K, a: &'static [Node], ctx: &C) -> R<Value> {
+        match k {
+            K::And => {
+                for x in a {
+                    if !self.eval_bool(x, ctx)? {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            K::Or => {
+                for x in a {
+                    if self.eval_bool(x, ctx)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            K::Not => Ok(Value::Bool(!self.eval_bool(&a[0], ctx)?)),
+            K::Eq => Ok(Value::Bool(val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
+            K::Ne => Ok(Value::Bool(!val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
+            K::If => {
+                if self.eval_bool(&a[0], ctx)? {
+                    self.eval(&a[1], ctx)
+                } else {
+                    self.eval(&a[2], ctx)
+                }
+            }
+            _ => self.eval_op(n, k, a, ctx),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_slow(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
             E::Num(v) => Ok(Value::Int(*v)),
             E::Str(s, id) => Ok(Value::Str(self.str_node(s, id))),
@@ -1222,6 +1318,7 @@ impl Evaluator {
         }
     }
 
+    #[inline(never)]
     fn eval_op(&self, n: N, k: K, a: &'static [Node], ctx: &C) -> R<Value> {
         match k {
             K::And => {
@@ -1466,10 +1563,7 @@ impl Evaluator {
                     }
                 }
             }
-            if let SetK::Interval(1, _) = s.k {
-                return Ok(if vals.is_empty() { empty_tuple() } else { Value::Tuple(Rc::new(vals)) });
-            }
-            return Ok(make_fcn(dom, vals));
+            return Ok(s.fcn_shape()?.make(vals));
         }
         let mut dom: Vec<Value> = vec![];
         let mut vals: Vec<Value> = vec![];

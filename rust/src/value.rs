@@ -76,6 +76,7 @@ pub enum SetK {
 pub struct SetV {
     pub k: SetK,
     cache: OnceCell<Vec<Value>>,
+    shape: OnceCell<FcnShape>,
 }
 
 thread_local! {
@@ -91,10 +92,19 @@ pub fn empty_set() -> Rc<SetV> {
 
 impl SetV {
     pub fn new(k: SetK) -> SetV {
-        SetV { k, cache: OnceCell::new() }
+        SetV { k, cache: OnceCell::new(), shape: OnceCell::new() }
     }
     pub fn of(elems: Vec<Value>) -> Value {
         Value::Set(Rc::new(SetV::new(SetK::Enum(elems))))
+    }
+    /// The canonical shape of functions whose domain is this set (cached: it is shared by all such functions).
+    pub fn fcn_shape(&self) -> R<&FcnShape> {
+        if let Some(s) = self.shape.get() {
+            return Ok(s);
+        }
+        let sh = FcnShape::of(self.elems()?);
+        let _ = self.shape.set(sh);
+        Ok(self.shape.get().unwrap())
     }
     #[inline]
     pub fn reducible(&self) -> bool {
@@ -318,7 +328,7 @@ impl SetV {
                 }
                 let mut out = Vec::with_capacity(total as usize);
                 let mut idx = vec![0usize; n];
-                let shape = FcnShape::of(d);
+                let shape = dom.fcn_shape()?;
                 loop {
                     out.push(shape.make(idx.iter().map(|&i| r[i].clone()).collect()));
                     let mut k = n as isize - 1;

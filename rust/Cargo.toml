@@ -8,6 +8,7 @@ name = "verify-rs"
 path = "src/main.rs"
 
 [dependencies]
+mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
 
 [profile.release]
 opt-level = 3
@@ -15,3 +16,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
+
+[profile.profiling]
+inherits = "release"
+debug = true
+lto = "thin"
