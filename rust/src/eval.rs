@@ -334,6 +334,14 @@ fn captures_ctx(v: &Value) -> bool {
     }
 }
 
+/// Action composition (\cdot) is off by default, as in TLC; `-cdot` or the Java property
+/// `-Dtlc2.tool.impl.Tool.cdot=true` (Java shim) switches it on.
+pub static CDOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn cdot_enabled() -> bool {
+    CDOT.load(std::sync::atomic::Ordering::Relaxed)
+}
+const NO_CDOT: &str = "The current version of TLC does not support action composition.  An incomplete implementation can be enabled via the tlc2.tool.impl.Tool.cdot=true java property.";
+
 pub fn ev() -> &'static Evaluator {
     EV.with(|e| e.get()).expect("evaluator not initialised")
 }
@@ -1592,6 +1600,7 @@ impl Evaluator {
             }
             K::BoxAct => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? || self.unchanged_val(&a[1], ctx)?)),
             K::AngleAct => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? && !self.unchanged_val(&a[1], ctx)?)),
+            K::Cdot if !cdot_enabled() => self.fail(NO_CDOT.into(), n),
             K::Cdot => match self.enumerate(n, ctx, &mut || Err(Box::new(Fail::Found))) {
                 Ok(()) => Ok(Value::Bool(false)),
                 Err(e) if matches!(*e, Fail::Found) => Ok(Value::Bool(true)),
@@ -2211,6 +2220,7 @@ impl Evaluator {
         }
         match &e.e {
             E::Op(kind, a) => match kind {
+                K::Cdot if !cdot_enabled() => return self.fail(NO_CDOT.into(), e),
                 K::Cdot => {
                     // s -(A \cdot B)-> u  iff  there is a t with  s -A-> t  and  t -B-> u
                     if !self.init_mode.get() {

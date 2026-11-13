@@ -149,7 +149,8 @@ impl SetV {
             SetK::Subset(b) => b.enumerable(),
             SetK::FcnSet(d, r) => d.enumerable() && r.enumerable(),
             SetK::RecSet(_, s) | SetK::Cross(s) => s.iter().all(|x| x.enumerable()),
-            SetK::Seq(_) | SetK::Inf(_) | SetK::Any | SetK::KSubset(..) => false,
+            SetK::Seq(_) | SetK::Inf(_) | SetK::Any => false,
+            SetK::KSubset(k, _) => *k == 0, // kSubset(0, S) = {{}} whatever S is
             SetK::Cup(a, b) => a.enumerable() && b.enumerable(),
             SetK::Cap(a, b) => a.enumerable() || b.enumerable(),
             SetK::Diff(a, _) => a.enumerable(),
@@ -175,6 +176,22 @@ impl SetV {
                     n = n.saturating_mul(x.size()?);
                 }
                 n
+            }
+            SetK::KSubset(k, b) if *k > 0 && b.enumerable() => {
+                // n choose k, through the short side of Pascal's triangle
+                let n = b.size()? as i128;
+                let k = (*k as i128).min(n - *k as i128);
+                if k < 0 {
+                    return Ok(0);
+                }
+                let mut c: i128 = 1;
+                for i in 0..k {
+                    c = c * (n - i) / (i + 1);
+                    if c > i64::MAX as i128 {
+                        return Ok(i64::MAX);
+                    }
+                }
+                c as i64
             }
             _ => self.elems()?.len() as i64,
         })
@@ -463,6 +480,7 @@ impl SetV {
             }
             SetK::Seq(base) => eval_err(format!("Attempted to enumerate the non-enumerable set Seq({}).", fmt_set(base))),
             SetK::Inf(_) => eval_err(format!("Attempted to enumerate the non-enumerable set {}.", fmt_set(self))),
+            SetK::KSubset(0, _) => Ok(vec![Value::Set(empty_set())]),
             SetK::Any | SetK::KSubset(..) => eval_err(format!("Attempted to enumerate a non-enumerable set ({}).", fmt_set(self))),
             SetK::Cup(a, b) => {
                 if !(a.enumerable() && b.enumerable()) {
@@ -593,6 +611,14 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
             }
             if Rc::ptr_eq(x, y) {
                 return Ok(Ordering::Equal);
+            }
+            // TLC (KSubsetValue.compareTo): k-subsets of the same infinite base are ordered by k
+            if let (SetK::KSubset(k1, b1), SetK::KSubset(k2, b2)) = (&x.k, &y.k) {
+                if let (SetK::Inf(i), SetK::Inf(j)) = (&b1.k, &b2.k) {
+                    if i == j && k1 != k2 {
+                        return Ok(k1.cmp(k2));
+                    }
+                }
             }
             let (x, y) = (x.elems()?, y.elems()?);
             if x.len() != y.len() {
@@ -768,6 +794,27 @@ pub fn set_eq(a: &Rc<SetV>, b: &Rc<SetV>) -> R<bool> {
     if !ea || !eb {
         if let (SetK::Inf(x), SetK::Inf(y)) = (&a.k, &b.k) {
             return Ok(x == y);
+        }
+        // TLC (KSubsetValue.equals): two non-empty k-subset values are equal iff k and the base sets are
+        if let (SetK::KSubset(k1, b1), SetK::KSubset(k2, b2)) = (&a.k, &b.k) {
+            if *k1 > 0 && *k2 > 0 {
+                return Ok(k1 == k2 && set_eq(b1, b2)?);
+            }
+        }
+        // sets of records over the same fields with equal component sets
+        if let (SetK::RecSet(n1, s1), SetK::RecSet(n2, s2)) = (&a.k, &b.k) {
+            if n1 == n2 {
+                let mut all = true;
+                for (x, y) in s1.iter().zip(s2.iter()) {
+                    if !set_eq(x, y)? {
+                        all = false;
+                        break;
+                    }
+                }
+                if all {
+                    return Ok(true);
+                }
+            }
         }
         if ea != eb {
             return Ok(false);
@@ -1158,6 +1205,7 @@ fn fmt_set_into(s: &SetV, o: &mut String) {
             Inf::String => "STRING",
         }),
         SetK::Any => o.push_str("Any"),
+        SetK::KSubset(0, _) => o.push_str("{{}}"),
         SetK::KSubset(k, b) => {
             o.push_str(&format!("kSubset({}, ", k));
             fmt_set_into(b, o);

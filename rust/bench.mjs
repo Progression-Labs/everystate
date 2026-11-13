@@ -68,6 +68,7 @@ const engines = {
   },
 };
 for (const s of SKIP) delete engines[s];
+if (!fs.existsSync(TS_CLI)) { delete engines.node; delete engines.bun; } // TypeScript engine not present
 
 // Peak RSS of one run, in MB: /usr/bin/time -v when available, otherwise getrusage(RUSAGE_CHILDREN) via python3.
 function peakRssMb(cmd, argv) {

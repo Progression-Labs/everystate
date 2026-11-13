@@ -333,6 +333,7 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
                 config = argv.get(i).cloned();
             }
             "-deadlock" => deadlock = false,
+            "-cdot" | "-Dtlc2.tool.impl.Tool.cdot=true" => crate::eval::CDOT.store(true, std::sync::atomic::Ordering::Relaxed),
             "-tool" => tool = true,
             "-json" => json = true,
             "-dump" => {
@@ -502,11 +503,117 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
     })
 }
 
+/// ALIAS: the text TLC prints for a trace state when the configuration names an alias
+/// (Tool.evalAlias and RecordValue.PrintTLCState).  `Ok(None)`: print the plain state.
+/// `Err`: formatting threw, with the Java exception class and message.
+fn alias_text(model: &Model, cur: &StateRef, nxt: &StateRef) -> Result<Option<String>, (String, String)> {
+    let p = match &model.alias {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let ev = crate::eval::ev();
+    ev.set_state(cur, Some(nxt));
+    ev.init_mode.set(false);
+    ev.prime_depth.set(0);
+    ev.call_depth.set(0);
+    ev.n_assigned.set(0);
+    let mut fields: Vec<(String, crate::value::Value)> = vec![];
+    match ev.eval(p.e, &p.ctx) {
+        Ok(crate::value::Value::Record(r)) => {
+            // TLC prints the fields in the order of the record constructor, not sorted
+            let mut order: Vec<StrId> = vec![];
+            if let Some(Sym::Def(d)) = model.root.syms.get(name(&p.name)) {
+                if let Some(b) = d.body.get() {
+                    if let crate::ast::E::Rec(fs, _) = &b.e {
+                        order = fs.iter().map(|f| f.0).collect();
+                    }
+                }
+            }
+            for id in order.iter().chain(r.names.iter()) {
+                let k = str_of(*id).to_string();
+                if fields.iter().any(|f| f.0 == k) {
+                    continue;
+                }
+                if let Some(v) = r.get(*id) {
+                    fields.push((k, v.clone()));
+                }
+            }
+        }
+        Ok(_) => return Ok(None),
+        Err(e) => match *e {
+            crate::intern::Fail::Tla(t) => {
+                for (i, v) in model.vars.iter().enumerate() {
+                    fields.push((v.name.to_string(), cur.get(i)));
+                }
+                fields.push(("_ALIASEvalError".into(), crate::value::Value::Str(str_id(&t.msg))));
+            }
+            _ => return Ok(None),
+        },
+    }
+    let fi = fields.iter().position(|f| f.0 == "_format");
+    let format = match fi {
+        Some(i) => match &fields[i].1 {
+            crate::value::Value::Str(s) => str_of(*s).to_string(),
+            _ => return Err(("java.lang.ClassCastException".into(), "the _format field of an ALIAS must be a string".into())),
+        },
+        None => (if fields.len() == 1 { "%s = %s\n" } else { "/\\ %s = %s\n" }).to_string(),
+    };
+    let mut out = String::new();
+    for (i, (k, v)) in fields.iter().enumerate() {
+        if Some(i) == fi {
+            continue;
+        }
+        match crate::community::java_format(&format, &[k.clone(), ppr(&fmt(v))]) {
+            Ok(t) => out += &t,
+            Err(_) => {
+                // a conversion other than %s applied to a string argument
+                let c: Vec<char> = format.chars().collect();
+                let mut j = 0;
+                while j < c.len() {
+                    if c[j] == '%' {
+                        j += 1;
+                        while j < c.len() && !c[j].is_ascii_alphabetic() && c[j] != '%' {
+                            j += 1;
+                        }
+                        if j < c.len() && !"sSn%".contains(c[j]) {
+                            return Err(("java.util.IllegalFormatConversionException".into(), format!("{} != java.lang.String", c[j])));
+                        }
+                    }
+                    j += 1;
+                }
+                return Err(("java.util.MissingFormatArgumentException".into(), format!("Format specifier in '{}'", format)));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 fn print_trace(rep: &Reporter, model: &Model, res: &CheckResult) {
     if let Some(tr) = &res.trace {
         for (i, t) in tr.iter().enumerate() {
             let label = action_label(if i == 0 { None } else { t.action.map(|a| &model.actions[a]) });
-            rep.msg(2217, 4, &format!("{}: {}\n{}", i + 1, label, state_text(model, &t.state)));
+            // the successor used for primed variables in an ALIAS: the next trace state, the state the
+            // lasso returns to, or the state itself
+            let nxt = match tr.get(i + 1) {
+                Some(n) => &n.state,
+                None => match res.loop_to {
+                    Some(l) if l >= 0 && (l as usize) < tr.len() => &tr[l as usize].state,
+                    _ => &t.state,
+                },
+            };
+            let text = match alias_text(model, &t.state, nxt) {
+                Ok(Some(x)) => x,
+                Ok(None) => state_text(model, &t.state),
+                Err((class, m)) => {
+                    rep.msg(
+                        1000,
+                        1,
+                        &format!("TLC threw an unexpected exception.\nThis was probably caused by an error in the spec or model.\nSee the User Output or TLC Console for clues to what happened.\nThe exception was a {}\n: {}", class, m),
+                    );
+                    return;
+                }
+            };
+            rep.msg(2217, 4, &format!("{}: {}\n{}", i + 1, label, text));
         }
     }
 }
@@ -803,6 +910,8 @@ pub fn run_java_shim(argv: &[String], host: HostRef) -> i32 {
         let a = &argv[i];
         if let Some(l) = a.strip_prefix("-DTLA-Library=") {
             libs.extend(l.split([':', ';']).filter(|x| !x.is_empty()).map(|x| x.to_string()));
+        } else if a == "-Dtlc2.tool.impl.Tool.cdot=true" {
+            crate::eval::CDOT.store(true, std::sync::atomic::Ordering::Relaxed);
         } else if a == "-cp" || a == "-classpath" || a == "-jar" {
             i += 1;
         } else if !a.starts_with('-') {

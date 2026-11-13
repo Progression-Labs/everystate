@@ -22,7 +22,8 @@ target/release/everystate [options] SPEC[.tla]
 | `-tool` | TLC's machine-readable message framing (`@!@!@STARTMSG ...`) |
 | `-dump FILE`, `-dump dot[,actionlabels] FILE` | write the reachable states / the state graph |
 | `-json` | one JSON line: `{"status","name","message","generated","distinct","queue","depth","loopTo","trace":[{"action","state":{var:"value"}}]}` |
-| `-workers N`, `-metadir DIR`, `-lncheck S`, ... | accepted and ignored, as in the TypeScript CLI |
+| `-cdot`, `-Dtlc2.tool.impl.Tool.cdot=true` | enable action composition (`\cdot`), which is an error otherwise, as in TLC |
+| `-workers N`, `-metadir DIR`, `-lncheck S`, ... | accepted and ignored |
 
 Exit statuses are TLC's: 0 success, 10 assumption, 11 deadlock, 12 invariant, 13 property (action
 property, implied init, liveness), 75/76 evaluation errors, 150 parse error, 151 config error, 255 other.
@@ -67,9 +68,9 @@ All of these are run against real TLC results or against the TypeScript engine:
 | check | command | result |
 |---|---|---|
 | tlaplus/Examples manifest, runtime <= 5 s | `EVERYSTATE_CMD=rust/target/release/everystate node scripts/conformance.mjs <Examples> --max-runtime 5 --timeout 120` (from the Examples checkout) | 122 / 122 |
-| TLC `test-model` differential | `EVERYSTATE_CMD=... node scripts/diff-tlc.mjs <test-model>` | 372 / 414, TypeScript 371 in the same run (see BENCHMARK.md for why this is not 377) |
+| TLC `test-model` differential against live `tla2tools.jar` | `EVERYSTATE_CMD=... node scripts/diff-tlc.mjs <test-model>` | 384 / 414, 4 skipped (TLC times out); the 26 mismatches and their reasons are in BENCHMARK.md |
 | pstack statechart corpus through the Java shim | `EVERYSTATE_JAVA_CMD="rust/target/release/everystate java" node scripts/statechart-corpus.mjs <scripts>` | 33 / 33 byte-identical |
-| complete text output vs TypeScript on `test-model` | `node rust/scripts/diff-ts.mjs <test-model>` (also with `--tool`) | 398 of 408 identical; the 10 differences are listed in BENCHMARK.md |
+| complete text output vs the TypeScript engine (debugging aid only, TLC is the arbiter) | `node rust/scripts/diff-ts.mjs <test-model>` (also with `--tool`) | 398 of 408 identical before the Rust-only TLC fixes listed below |
 | pretty-printer, 337 cases produced by Java | `node --experimental-strip-types --test rust/tests/pprint.test.ts` | all pass |
 | community-module fixtures and upstream tests | `node rust/tests/community.mjs` | 21 / 21 |
 | WebAssembly API | `node --experimental-strip-types --test rust/wasm/check.test.ts`, `bun test rust/wasm/check.test.ts` | 6 / 6 each |
@@ -100,17 +101,40 @@ All of these are run against real TLC results or against the TypeScript engine:
   3-23 % faster than glibc malloc on the models tried. WebAssembly uses the standard allocator.
 - Nothing else; no dependency at all for the WebAssembly build.
 
-## Known differences from the TypeScript engine
+## Running without the TypeScript engine
 
-- `SUBSET S \cup T`, `[]x = 1` and other prefix operators followed by an infix operator of overlapping
-  precedence are rejected with SANY's "Precedence conflict" (TypeScript accepts them); `DOMAIN` has
-  precedence 9-9 as in SANY. SANY's second conflict rule (`a * -b`, `2 ^ -x`, `a \o -b`) is still accepted.
-- A step reference with arguments in a proof (`<1>4!1!(v)`) parses; TypeScript reports a parse error.
+`scripts/conformance.mjs`, `scripts/diff-tlc.mjs` and `scripts/statechart-corpus.mjs` use the Rust
+binary when `EVERYSTATE_CMD` / `EVERYSTATE_JAVA_CMD` is set, and fall back to
+`rust/target/release/everystate` when `src/cli.ts` (`src/java.ts`) does not exist. `rust/tests/*`,
+`rust/wasm/check.test.ts` and `rust/bench.mjs` need only the binary, Node and (for the benchmark) TLC;
+`rust/tests/community.mjs` reads the fixture specs in `test/community`. `rust/scripts/export-lib.mjs`
+without an argument regenerates `src/bundled.rs` from `rust/lib/*.tla`. Only `rust/scripts/diff-ts.mjs`
+and the files in `test/*.test.ts` need `src/`.
+
+## Where the Rust engine follows TLC and the TypeScript engine does not
+
+- Prefix operators followed by an infix operator of overlapping precedence (`SUBSET S \cup T`,
+  `[]x = 1`) and unary minus after a tighter infix operator (`a * -b`, `2 ^ -x`) are SANY's
+  "Precedence conflict" parse errors; `DOMAIN` has precedence 9-9.
+- A step reference with arguments in a proof (`<1>4!1!(v)`) parses.
+- `AXIOM` is not evaluated (only `ASSUME` / `ASSUMPTION`).
+- `ALIAS` is applied to printed trace states, including `_format` and `_ALIASEvalError`.
+- `\cdot` is rejected unless enabled (see the options).
+- `kSubset(0, S)` is `{{}}` for any `S`; large `kSubset`s stay symbolic.
 - Stack exhaustion is always reported as TLC-style "Stack overflow ..." (TypeScript can die with a raw
   `RangeError` while normalising temporal formulas, e.g. test-model `Github1389Loops`).
-- `RandomElement` / `Randomization` use a different generator, so runs that depend on random choices
-  differ (as they do between two TLC runs).
+
+Repro specs for these are in `repro/`; BENCHMARK.md has the table.
+
+## Other notes
+
+- `RandomElement` / `Randomization` use a different generator than TLC and than the TypeScript engine,
+  so runs that depend on random choices differ (as they do between two TLC runs).
 - Timestamps are printed in UTC.
+- Liveness is checked once, after the state space is complete (TLC's `-lncheck final`); TLC's
+  detection of safety-shaped temporal properties during the search is not implemented.
+- A liveness violation prints "Temporal properties were violated." (TLC 2.19 text); TLC 2026 names the
+  properties.
 - Runtime-created strings are interned when created rather than when first compared; this can only
   reorder two strings that never appear in the spec or config.
 - Internals that do not change results: one 64-bit fingerprint with per-value hash caching, early-exit

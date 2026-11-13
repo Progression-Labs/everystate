@@ -371,7 +371,7 @@ fn to_json(ev: &Evaluator, v: &Value) -> R<String> {
 }
 
 // java.lang.String.format for the conversions that make sense with string arguments.
-fn java_format(template: &str, params: &[String]) -> R<String> {
+pub(crate) fn java_format(template: &str, params: &[String]) -> R<String> {
     // %(\d+\$)?([-#+ 0,(<]*)(\d+)?(\.\d+)?([a-zA-Z%])
     let t: Vec<char> = template.chars().collect();
     let mut out = String::new();

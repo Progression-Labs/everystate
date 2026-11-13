@@ -425,6 +425,18 @@ impl<'a> Checker<'a> {
             ev.set_state(&self.empty, None);
             ev.init_mode.set(false);
             let at = loc_str(&a.e.loc, &a.module.to_string());
+            if std::env::var_os("EVERYSTATE_DEBUG_ASSUMES").is_some() {
+                // debugging aid: report every failing assumption instead of stopping at the first
+                if std::env::var("EVERYSTATE_DEBUG_ASSUMES").map_or(false, |v| v == "2") {
+                    eprintln!("CHECK {}", at);
+                }
+                match ev.eval(a.e, &None) {
+                    Ok(Value::Bool(true)) => {}
+                    Ok(v) => eprintln!("ASSUME {}: {}", at, if matches!(v, Value::Bool(false)) { "FALSE" } else { "not boolean" }),
+                    Err(e) => eprintln!("ASSUME {}: {}", at, self.describe_err(&e, false).replace('\n', " | ")),
+                }
+                continue;
+            }
             match ev.eval(a.e, &None) {
                 Err(e) => {
                     let mut r = match *e {
