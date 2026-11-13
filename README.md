@@ -101,6 +101,12 @@ Current results are in [CONFORMANCE.md](CONFORMANCE.md).
 - Trace-explorer spec generation, the debugger, coverage statistics, Java module overrides.
 - TLAPS proofs are parsed and skipped, not checked.
 
+## Rust port
+
+`rust/` holds `verify-rs`, a Rust port of the safety checker (no liveness, `-tool` or `-dump`),
+built to compare speed. It is about 2x faster than this TypeScript engine on Node and roughly level
+with single-worker Java TLC; see `rust/BENCHMARK.md`. The TypeScript engine is the complete one.
+
 ## Layout
 
 ```

@@ -70,6 +70,7 @@ pub enum SetK {
     Cup(Rc<SetV>, Rc<SetV>),
     Cap(Rc<SetV>, Rc<SetV>),
     Diff(Rc<SetV>, Rc<SetV>),
+    Union(Vec<Rc<SetV>>),
     Filter(Box<FilterSet>),
 }
 
@@ -120,6 +121,7 @@ impl SetV {
             SetK::Cup(a, b) => a.enumerable() && b.enumerable(),
             SetK::Cap(a, b) => a.enumerable() || b.enumerable(),
             SetK::Diff(a, _) => a.enumerable(),
+            SetK::Union(ss) => ss.iter().all(|x| x.enumerable()),
             SetK::Filter(f) => f.s.enumerable(),
         }
     }
@@ -146,7 +148,7 @@ impl SetV {
         })
     }
     fn is_derived(&self) -> bool {
-        matches!(self.k, SetK::Cup(..) | SetK::Cap(..) | SetK::Diff(..) | SetK::Filter(_))
+        matches!(self.k, SetK::Cup(..) | SetK::Cap(..) | SetK::Diff(..) | SetK::Union(_) | SetK::Filter(_))
     }
     pub fn contains(&self, v: &Value) -> R<bool> {
         match &self.k {
@@ -264,6 +266,14 @@ impl SetV {
                     SetK::Cup(a, b) => Ok(a.contains(v)? || b.contains(v)?),
                     SetK::Cap(a, b) => Ok(a.contains(v)? && b.contains(v)?),
                     SetK::Diff(a, b) => Ok(a.contains(v)? && !b.contains(v)?),
+                    SetK::Union(ss) => {
+                        for x in ss {
+                            if x.contains(v)? {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }
                     SetK::Filter(f) => Ok(f.s.contains(v)? && ev().filter_test(f, v)?),
                     _ => unreachable!(),
                 }
@@ -345,7 +355,7 @@ impl SetV {
                         break;
                     }
                 }
-                sort_dedup(out)
+                Ok(out) // odometer order over normalized components is already the normalized order
             }
             SetK::RecSet(names, sets) => {
                 let mut es = Vec::with_capacity(sets.len());
@@ -374,7 +384,7 @@ impl SetV {
                         break;
                     }
                 }
-                sort_dedup(out)
+                Ok(out) // odometer order over normalized components is already the normalized order
             }
             SetK::Cross(sets) => {
                 let mut es = Vec::with_capacity(sets.len());
@@ -444,6 +454,16 @@ impl SetV {
                 }
                 sort_dedup(out)
             }
+            SetK::Union(ss) => {
+                if !self.enumerable() {
+                    return self.not_enum();
+                }
+                let mut out = Vec::new();
+                for x in ss {
+                    out.extend_from_slice(x.elems()?);
+                }
+                sort_dedup(out)
+            }
             SetK::Filter(f) => {
                 if !f.s.enumerable() {
                     return self.not_enum();
@@ -461,6 +481,7 @@ impl SetV {
             SetK::Cap(a, b) => format!("{} \\cap {}", fmt_set(a), fmt_set(b)),
             SetK::Diff(a, b) => format!("{} \\ {}", fmt_set(a), fmt_set(b)),
             SetK::Filter(f) => format!("{{x \\in {} : ...}}", fmt_set(&f.s)),
+            SetK::Union(ss) => format!("UNION {{{}}}", ss.iter().map(|x| fmt_set(x)).collect::<Vec<_>>().join(", ")),
             _ => fmt_set(self),
         }
     }

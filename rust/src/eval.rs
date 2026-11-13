@@ -287,7 +287,7 @@ fn captures_ctx(v: &Value) -> bool {
             SetK::Filter(_) => true,
             SetK::Cup(a, b) | SetK::Cap(a, b) | SetK::Diff(a, b) | SetK::FcnSet(a, b) => set(a) || set(b),
             SetK::Subset(a) | SetK::Seq(a) | SetK::KSubset(_, a) => set(a),
-            SetK::RecSet(_, ss) | SetK::Cross(ss) => ss.iter().any(|x| set(x)),
+            SetK::RecSet(_, ss) | SetK::Cross(ss) | SetK::Union(ss) => ss.iter().any(|x| set(x)),
             _ => false,
         }
     }
@@ -593,7 +593,12 @@ impl Evaluator {
 
     /// Expand a definition application into (body, context) without evaluating it.
     pub fn expand_def(&self, def: &'static Def, thunks: &[Value], base: &C) -> R<Expansion> {
-        let def = def.resolved();
+        self.expand_def_raw(def.resolved(), thunks, base)
+    }
+    /// Like expand_def, but without applying a config override (`Op <- Other`) to `def` itself: an
+    /// instantiated definition `I!Op` denotes the original body of Op even when the config replaces Op
+    /// (TLC overrides the root module's operator node, not its instantiated copies).
+    fn expand_def_raw(&self, def: &'static Def, thunks: &[Value], base: &C) -> R<Expansion> {
         if def.builtin.get().is_some() {
             return Ok(None);
         }
@@ -602,7 +607,9 @@ impl Evaluator {
                 return eval_err(format!("The operator {} expects {} arguments but was given {}.", def.name, def.params.len(), thunks.len()));
             }
             let env = self.build_env(def, thunks, base);
-            return self.expand_def(inst.orig, &thunks[inst.nparams..], &env);
+            // a module-scoped override (`Op = [M]v`) replaces M's operator itself, hence also its instances
+            let orig = if inst.orig.over_scoped.get() { inst.orig.resolved() } else { inst.orig };
+            return self.expand_def_raw(orig, &thunks[inst.nparams..], &env);
         }
         let ps = &def.params;
         if ps.len() != thunks.len() {
@@ -755,7 +762,10 @@ impl Evaluator {
             _ => return eval_err(format!("Attempted to apply a non-operator value {} as an operator.", fmt(op))),
         }
         match self.expand_op(op, args)? {
-            Some((body, ctx)) => self.eval(body, &ctx),
+            Some((body, ctx)) => {
+                check_stack()?;
+                self.eval(body, &ctx)
+            }
             None => {
                 // instance of a builtin operator (e.g. LET T == INSTANCE TLC IN T!PrintT(x))
                 let mut d = match op {
@@ -891,6 +901,7 @@ impl Evaluator {
                         for i in 0..args.len() {
                             c = cons(d.params[i].name, self.mk_arg(&args[i], ctx)?, &c);
                         }
+                        check_stack()?;
                         return self.eval(&d.body, &c);
                     }
                     Looked::LetInst(d, head) => Value::DefRef(Rc::new(DefRef { def: d, base: Some(head) })),
@@ -1393,6 +1404,18 @@ impl Evaluator {
             K::BigUnion => {
                 let s = self.eval_set(&a[0], ctx)?;
                 let es = self.elems_at(&s, &a[0])?;
+                // TLC keeps UNION lazy (UnionValue) unless every element is an explicit set: membership works
+                // even over non-enumerable sets, and nothing is enumerated until it has to be.
+                if es.iter().any(|x| matches!(x, Value::Set(xs) if !xs.reducible())) {
+                    let mut sets: Vec<Rc<SetV>> = Vec::with_capacity(es.len());
+                    for x in es {
+                        match x {
+                            Value::Set(xs) => sets.push(xs.clone()),
+                            _ => return self.fail(format!("Attempted to apply UNION to a set containing the non-set value {}", fmt(x)), n),
+                        }
+                    }
+                    return Ok(Value::Set(if sets.len() == 1 { sets.pop().unwrap() } else { Rc::new(SetV::new(SetK::Union(sets))) }));
+                }
                 let mut all: Vec<Value> = Vec::new();
                 for x in es {
                     match x {

@@ -242,9 +242,10 @@ export class InfSetV extends SetBase {
 
 // Lazy union / intersection / difference / filter, used only when an operand is not enumerable.
 export class LazySetV extends SetBase {
-  desc: string;
+  private d: string | (() => string);
+  get desc(): string { return typeof this.d === 'string' ? this.d : this.d(); }
   pred: (v: Value) => boolean;
-  constructor(desc: string, pred: (v: Value) => boolean) { super(); this.desc = desc; this.pred = pred; }
+  constructor(desc: string | (() => string), pred: (v: Value) => boolean) { super(); this.d = desc; this.pred = pred; }
   contains(v: Value): boolean { return this.pred(v); }
   enumerable(): boolean { return false; }
   elems(): Value[] { return err(`Attempted to enumerate a non-enumerable set (${this.desc}).`); }
@@ -252,11 +253,12 @@ export class LazySetV extends SetBase {
 
 // A set defined by a membership predicate plus an on-demand enumeration (TLC's lazy SetPred/SetCup/...).
 export class DerivedSetV extends SetBase {
-  desc: string;
+  private d: string | (() => string);
+  get desc(): string { return typeof this.d === 'string' ? this.d : this.d(); }
   pred: (v: Value) => boolean;
   gen: (() => Value[]) | null;
   private cache: Value[] | null = null;
-  constructor(desc: string, pred: (v: Value) => boolean, gen: (() => Value[]) | null) { super(); this.desc = desc; this.pred = pred; this.gen = gen; }
+  constructor(desc: string | (() => string), pred: (v: Value) => boolean, gen: (() => Value[]) | null) { super(); this.d = desc; this.pred = pred; this.gen = gen; }
   contains(v: Value): boolean { return this.cache ? bsearch(this.cache, v) >= 0 : this.pred(v); }
   enumerable(): boolean { return this.gen !== null; }
   elems(): Value[] {
