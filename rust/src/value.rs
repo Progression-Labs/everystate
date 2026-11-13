@@ -524,11 +524,6 @@ fn eq_fail<X>(a: &Value, b: &Value) -> R<X> {
     eval_err(format!("Attempted to check equality of the {} {} with the {} {}", kind_name(a), fmt(a), kind_name(b), fmt(b)))
 }
 
-pub fn model_type(id: StrId) -> Option<u8> {
-    let s = str_of(id);
-    let b = s.as_bytes();
-    if b.len() > 2 && b[1] == b'_' { Some(b[0]) } else { None }
-}
 
 fn model_cmp(m: StrId, o: &Value) -> R<Ordering> {
     if let Value::Model(x) = o {
