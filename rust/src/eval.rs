@@ -312,7 +312,7 @@ fn check_stack() -> R<()> {
     let here = &x as *const u8 as usize;
     let used = STACK_BASE.with(|c| c.get()).wrapping_sub(here);
     if used > STACK_LIMIT.with(|c| c.get()) {
-        return eval_err("Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.".into());
+        return err("stack", "Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.".into());
     }
     Ok(())
 }
@@ -383,6 +383,12 @@ pub struct Evaluator {
     pub stats: Stats,
     pub registers: RefCell<HashMap<RegKey, Value>>,
     pub tlc_cache: RefCell<HashMap<(usize, String), Value>>,
+    pub host: RefCell<crate::host::HostRef>,
+    /// while set, `eval` records the chain of expressions being evaluated (for TLC's message 2103)
+    pub tracing: Cell<bool>,
+    pub trace_stack: RefCell<Vec<N>>,
+    /// lazily built records for TLCGet("spec")
+    pub spec_info: RefCell<Option<Box<dyn Fn() -> R<Value>>>>,
     pub rng: Cell<u64>,
     at: Name,
     lambda: Name,
@@ -412,6 +418,10 @@ impl Evaluator {
             stats: Stats::default(),
             registers: RefCell::new(HashMap::new()),
             tlc_cache: RefCell::new(HashMap::new()),
+            host: RefCell::new(Rc::new(crate::host::NullHost)),
+            tracing: Cell::new(false),
+            trace_stack: RefCell::new(Vec::new()),
+            spec_info: RefCell::new(None),
             rng: Cell::new(0x9E3779B97F4A7C15),
             at: name("@"),
             lambda: name("LAMBDA"),
@@ -1169,6 +1179,18 @@ impl Evaluator {
 
     #[inline(never)]
     pub fn eval(&self, n: N, ctx: &C) -> R<Value> {
+        if self.tracing.get() {
+            self.trace_stack.borrow_mut().push(n);
+            let r = self.eval_inner(n, ctx);
+            if r.is_ok() {
+                self.trace_stack.borrow_mut().pop();
+            }
+            return r;
+        }
+        self.eval_inner(n, ctx)
+    }
+    #[inline(always)]
+    fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
             E::App { .. } => self.eval_app_forced(n, ctx),
             E::Op(k, a) => self.eval_op_fast(n, *k, a, ctx),

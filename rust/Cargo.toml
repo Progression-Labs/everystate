@@ -1,13 +1,18 @@
 [package]
-name = "verify-rs"
+name = "everystate"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "everystate"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
 [[bin]]
-name = "verify-rs"
+name = "everystate"
 path = "src/main.rs"
 
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
 
 [profile.release]
