@@ -32,7 +32,7 @@ async function worker() {
     const c = cases[next++];
     const t0 = Date.now();
     const out = await new Promise(res => {
-      const alt = (process.env.EVERYSTATE_CMD ?? process.env.VERIFY_CMD ?? (fs.existsSync(cli) ? undefined : path.resolve(import.meta.dirname, '../rust/target/release/everystate'))); // the Rust binary when the TypeScript engine is absent; // alternative implementation with the same -json interface (e.g. the Rust port)
+      const alt = (process.env.EVERYSTATE_CMD ?? process.env.VERIFY_CMD ?? (fs.existsSync(cli) ? undefined : path.resolve(import.meta.dirname, '../target/release/everystate'))); // the Rust binary when the TypeScript engine is absent; // alternative implementation with the same -json interface (e.g. the Rust port)
       // like the Examples CI (tla_utils.py), enable action composition, which TLC keeps behind a Java property
       const p = alt ? spawn(alt, ['-Dtlc2.tool.impl.Tool.cdot=true', '-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] })
         : spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', cli, '-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] });

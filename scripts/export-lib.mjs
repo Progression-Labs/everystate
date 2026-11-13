@@ -1,9 +1,9 @@
-// Exports the TLA+ sources bundled in the TypeScript implementation (bundled.ts) into rust/lib/*.tla
+// Exports the TLA+ sources bundled in the TypeScript implementation (bundled.ts) into lib/*.tla
 // and regenerates src/bundled.rs. usage: node scripts/export-lib.mjs /path/to/ts/src/bundled.ts
 import fs from 'node:fs';
 import path from 'node:path';
 const here = path.resolve(import.meta.dirname, '..');
-// Without an argument: regenerate src/bundled.rs from the rust/lib/*.tla files already present.
+// Without an argument: regenerate src/bundled.rs from the lib/*.tla files already present.
 let obj;
 if (process.argv[2]) {
   const src = fs.readFileSync(process.argv[2], 'utf8');

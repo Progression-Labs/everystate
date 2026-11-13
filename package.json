@@ -1,53 +1,23 @@
 {
   "name": "everystate",
-  "version": "0.1.0",
-  "description": "A TLA+ model checker (TLC-compatible) written in pure TypeScript. No Java.",
+  "version": "0.2.0",
+  "description": "A TLA+ model checker with no Java dependency (TLC-compatible). Rust engine compiled to WebAssembly.",
   "type": "module",
   "license": "MIT",
-  "bin": {
-    "everystate": "dist/cli.js",
-    "everystate-java": "dist/java.js"
-  },
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "CONFORMANCE.md",
-    "LICENSE"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
+  "main": "wasm/everystate.mjs",
+  "types": "wasm/everystate.d.ts",
+  "exports": { ".": { "types": "./wasm/everystate.d.ts", "default": "./wasm/everystate.mjs" } },
+  "bin": { "everystate": "wasm/cli.mjs" },
+  "files": ["wasm/everystate.mjs", "wasm/everystate.d.ts", "wasm/everystate.wasm", "wasm/cli.mjs", "README.md", "LICENSE"],
   "scripts": {
-    "build": "tsc -p .",
-    "bundle": "node scripts/bundle.mjs",
-    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "build": "cargo build --release && sh wasm/build.sh",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts && node test/community.mjs",
     "conformance:examples": "node scripts/conformance.mjs",
     "conformance:tlc": "node scripts/diff-tlc.mjs",
     "conformance:statechart": "node scripts/statechart-corpus.mjs",
-    "prepublishOnly": "npm run build"
+    "bench": "node scripts/bench.mjs"
   },
-  "devDependencies": {
-    "typescript": "^5.8.0",
-    "@types/node": "^22.0.0"
-  },
-  "keywords": [
-    "tla+",
-    "tlaplus",
-    "tlc",
-    "model-checker",
-    "formal-verification",
-    "formal-methods"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/mattzcarey/everystate.git"
-  }
+  "engines": { "node": ">=20" },
+  "keywords": ["tla", "tlaplus", "tlc", "model-checker", "formal-verification", "wasm"],
+  "repository": { "type": "git", "url": "git+https://github.com/mattzcarey/everystate.git" }
 }

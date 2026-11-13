@@ -3,8 +3,12 @@ name = "everystate"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/mattzcarey/everystate"
-description = "A TLA+ model checker (TLC-compatible)"
+description = "A TLA+ model checker with no Java dependency (TLC-compatible)"
 license = "MIT"
+readme = "README.md"
+keywords = ["tla", "tlaplus", "model-checker", "formal-verification"]
+categories = ["development-tools", "command-line-utilities"]
+include = ["src/**", "lib/**", "Cargo.toml", "README.md", "LICENSE"]
 
 [lib]
 name = "everystate"

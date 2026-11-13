@@ -2,8 +2,8 @@
 
 Engines compared, one worker each, doing the same breadth-first check of the same model:
 
-- **Rust**: `rust/target/release/everystate` (native);
-- **Rust/WASM (Node)**: the same core compiled to `wasm32-unknown-unknown`, run by `node rust/wasm/cli.mjs`;
+- **Rust**: `target/release/everystate` (native);
+- **Rust/WASM (Node)**: the same core compiled to `wasm32-unknown-unknown`, run by `node wasm/cli.mjs`;
 - **TS/Node**, **TS/Bun**: the TypeScript engine in `../src`;
 - **TLC**: Java TLC (`tla2tools.jar`, `-workers 1`).
 
@@ -56,14 +56,14 @@ re-measured after them.
 
 ```
 cd rust && cargo build --release && wasm/build.sh
-node rust/bench.mjs --runs 3            # prints the table; progress and raw times go to stderr
+node scripts/bench.mjs --runs 3            # prints the table; progress and raw times go to stderr
 ```
 
 Per model `bench.mjs` runs, with `cwd = refs/Examples` for the first four:
 
 ```
-rust/target/release/everystate -json -config <cfg> <spec>
-node rust/wasm/cli.mjs -config <cfg> <spec>
+target/release/everystate -json -config <cfg> <spec>
+node wasm/cli.mjs -config <cfg> <spec>
 node --experimental-strip-types --no-warnings src/cli.ts -json -config <cfg> <spec>
 bun src/cli.ts -json -config <cfg> <spec>
 # cwd = directory of the spec, JAVA_TOOL_OPTIONS unset:
@@ -116,13 +116,13 @@ Real TLC is the arbiter. Everything below was run with the final binary unless n
 
 | check | command | result |
 |---|---|---|
-| tlaplus/Examples manifest, runtime <= 5 s | `EVERYSTATE_CMD=rust/target/release/everystate node scripts/conformance.mjs . --max-runtime 5 --timeout 120` from the Examples checkout | **122 / 122** |
+| tlaplus/Examples manifest, runtime <= 5 s | `EVERYSTATE_CMD=target/release/everystate node scripts/conformance.mjs . --max-runtime 5 --timeout 120` from the Examples checkout | **122 / 122** |
 | the same, runtime <= 60 s (incl. liveness) | `... --max-runtime 60 --timeout 600` | 161 / 161 (run before the last correctness changes, not repeated) |
-| TLC `test-model` against live `tla2tools.jar` | `EVERYSTATE_CMD=rust/target/release/everystate node scripts/diff-tlc.mjs <test-model>` | **384 / 414**, 4 skipped because TLC itself times out, 26 mismatches (below) |
-| pstack statechart corpus through the Java shim | `EVERYSTATE_JAVA_CMD="rust/target/release/everystate java" node scripts/statechart-corpus.mjs <scripts>` | **33 / 33** byte-identical |
-| pretty-printer, 337 cases produced by Java | `node --experimental-strip-types --test rust/tests/pprint.test.ts` | all pass |
-| community-module fixtures and upstream tests | `node rust/tests/community.mjs` | 21 / 21 |
-| WebAssembly API (the six cases of `test/check.test.ts`) | `node --experimental-strip-types --test rust/wasm/check.test.ts`, `bun test rust/wasm/check.test.ts` | 6 / 6 each |
+| TLC `test-model` against live `tla2tools.jar` | `EVERYSTATE_CMD=target/release/everystate node scripts/diff-tlc.mjs <test-model>` | **384 / 414**, 4 skipped because TLC itself times out, 26 mismatches (below) |
+| pstack statechart corpus through the Java shim | `EVERYSTATE_JAVA_CMD="target/release/everystate java" node scripts/statechart-corpus.mjs <scripts>` | **33 / 33** byte-identical |
+| pretty-printer, 337 cases produced by Java | `node --experimental-strip-types --test test/pprint.test.ts` | all pass |
+| community-module fixtures and upstream tests | `node test/community.mjs` | 21 / 21 |
+| WebAssembly API (the six cases of `test/check.test.ts`) | `node --experimental-strip-types --test test/wasm.test.ts`, `bun test test/wasm.test.ts` | 6 / 6 each |
 
 Notes on these runs:
 
