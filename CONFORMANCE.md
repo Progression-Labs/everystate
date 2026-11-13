@@ -17,6 +17,11 @@ kind and on exact generated and distinct state counts.
 - The manifest labels action-property violations "liveness failure" (TLC exit code 13); the script
   maps them the same way.
 
+Larger models (upstream runtime up to 120 seconds, 15-minute timeout each): **161 of 164** match;
+the other three (`MCCheckpointCoordination`, `DijkstraMutex` Safety-4-processors, `MCInnerSerial`)
+hit the timeout rather than disagreeing. Run before the lazy-set description fix below, which only
+made things faster.
+
 ## TLC's own `test-model` directory
 
 `npm run conformance:tlc -- /path/to/tlaplus/tlatools/org.lamport.tlatools/test-model`

@@ -186,16 +186,23 @@ impl<'a> Checker<'a> {
         if let Some(sym) = &m.symmetry {
             let base = s.snapshot(self.nvars);
             for p in sym {
-                let mut u: Option<Vec<Value>> = None;
+                // Lexicographic comparison with the best candidate so far, variable by variable: most
+                // permutations lose on the first variable and the rest of the state is never permuted.
+                let mut u: Vec<Value> = Vec::new();
+                let mut wins = false;
                 for (i, v) in base.iter().enumerate() {
-                    if let Some(x) = permute(v, p)? {
-                        u.get_or_insert_with(|| base.clone())[i] = x;
+                    let x = permute(v, p)?.unwrap_or_else(|| v.clone());
+                    if !wins {
+                        match compare(&x, &canon.as_ref().unwrap_or(&base)[i])? {
+                            Ordering::Greater => break,
+                            Ordering::Less => wins = true,
+                            Ordering::Equal => {}
+                        }
                     }
+                    u.push(x);
                 }
-                if let Some(u) = u {
-                    if self.state_less(&u, canon.as_deref().unwrap_or(&base))? {
-                        canon = Some(u);
-                    }
+                if wins {
+                    canon = Some(u);
                 }
             }
         }

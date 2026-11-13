@@ -26,8 +26,9 @@ target/release/verify-rs [-json] [-config FILE] [-deadlock] SPEC.tla
 - Exit statuses follow the TypeScript CLI (0 ok, 10 assumption, 11 deadlock, 12 invariant,
   13 action property, 150/151 setup errors, 255 other errors).
 
-Dependencies: `std` plus `mimalloc` (global allocator; about 10-25 % faster than glibc malloc here,
-because the evaluator allocates many small reference-counted nodes).
+Dependencies: `std` plus `mimalloc` (global allocator; 3-23 % faster than glibc malloc on the models
+tried, because the evaluator allocates many small reference-counted nodes). `[profile.profiling]` in
+`Cargo.toml` is a release build with debug info for callgrind.
 
 ## Layout
 
@@ -41,6 +42,7 @@ because the evaluator allocates many small reference-counted nodes).
 | `src/stdlib.rs` | stdlib.ts, part of community.ts | Naturals, Integers, Reals, Sequences, FiniteSets, TLC, TLCExt, Bags, Randomization; native overrides for the hot community operators |
 | `src/cfg.rs`, `src/model.rs` | cfg.ts, model.ts | config parsing, constants, substitution, SPECIFICATION splitting, action splitting, properties, symmetry group closure, VIEW |
 | `src/checker.rs` | checker.ts | BFS, fingerprint set, counting rules, deadlock, trace reconstruction, POSTCONDITION |
+| `repro/` | - | minimal specs for the TypeScript bugs found while porting |
 | `lib/*.tla`, `src/bundled.rs` | bundled.ts | the bundled community / TLAPS modules, exported once by `scripts/export-lib.mjs` and embedded with `include_str!` |
 
 `node scripts/export-lib.mjs /path/to/ts/src/bundled.ts` regenerates `lib/` and `src/bundled.rs`.
@@ -75,3 +77,11 @@ because the evaluator allocates many small reference-counted nodes).
 - Descriptions of lazy sets are built only when an error message needs them. The TypeScript version
   formats them eagerly, which enumerates nested lazy sets (see BENCHMARK.md, "bugs found").
 - Deep recursion is limited by a 1 GiB evaluation stack instead of Node's 256 MB.
+- Three deliberate behaviour changes, each a bug in the TypeScript version confirmed against TLC
+  (BENCHMARK.md, "Bugs found"; repro specs in `repro/`): `UNION` over sets that are not explicit
+  stays lazy; a config replacement `Op <- Other` does not apply to `I!Op` inside an instance of the
+  same module; lazy-set descriptions are not built eagerly.
+- Symmetry canonicalisation stops permuting a state at the first variable that compares larger than
+  the best candidate. The canonical state, and therefore every count, is unchanged.
+- Enumerated function sets and record sets skip the "already sorted?" check (odometer order over
+  normalized components is the normalized order).

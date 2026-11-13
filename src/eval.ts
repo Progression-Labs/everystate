@@ -560,12 +560,12 @@ export class Evaluator {
         const a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
         if (reducible(a) && reducible(b)) return new SetV(a.elems().filter(x => b.contains(x)));
         const gen = a.enumerable() ? () => a.elems().filter(x => b.contains(x)) : b.enumerable() ? () => b.elems().filter(x => a.contains(x)) : null;
-        return new DerivedSetV(`${fmt(a)} \\cap ${fmt(b)}`, v => a.contains(v) && b.contains(v), gen);
+        return new DerivedSetV(() => `${fmt(a)} \\cap ${fmt(b)}`, v => a.contains(v) && b.contains(v), gen);
       }
       case O_diff: {
         const a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
         if (reducible(a)) return new SetV(a.elems().filter(x => !b.contains(x)));
-        return new DerivedSetV(`${fmt(a)} \\ ${fmt(b)}`, v => a.contains(v) && !b.contains(v), a.enumerable() ? () => a.elems().filter(x => !b.contains(x)) : null);
+        return new DerivedSetV(() => `${fmt(a)} \\ ${fmt(b)}`, v => a.contains(v) && !b.contains(v), a.enumerable() ? () => a.elems().filter(x => !b.contains(x)) : null);
       }
       case O_powerset: return new SubsetV(this.evalSet(n.a[0], ctx));
       case O_bigunion: {
@@ -657,7 +657,7 @@ export class Evaluator {
             this.cur = sc; this.nxt = sn;
             try { return f(); } finally { this.cur = c0; this.nxt = n0; }
           };
-          return new DerivedSetV(`{x \\in ${fmt(s)} : ...}`, v => s.contains(v) && inState(() => test(v)),
+          return new DerivedSetV(() => `{x \\in ${fmt(s)} : ...}`, v => s.contains(v) && inState(() => test(v)),
             s.enumerable() ? () => inState(() => s.elems().filter(test)) : null);
         }
         const es = s.elems();
@@ -809,7 +809,7 @@ export class Evaluator {
 
   setUnion(a: SetBase, b: SetBase): SetBase {
     if (!reducible(a) || !reducible(b)) {
-      return new DerivedSetV(`${fmt(a)} \\cup ${fmt(b)}`, v => a.contains(v) || b.contains(v), a.enumerable() && b.enumerable() ? () => a.elems().concat(b.elems()) : null);
+      return new DerivedSetV(() => `${fmt(a)} \\cup ${fmt(b)}`, v => a.contains(v) || b.contains(v), a.enumerable() && b.enumerable() ? () => a.elems().concat(b.elems()) : null);
     }
     const x = a.elems(), y = b.elems();
     if (x.length === 0) return b;
