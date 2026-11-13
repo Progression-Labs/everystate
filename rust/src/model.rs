@@ -312,13 +312,14 @@ impl Builder {
     }
 }
 
-pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<Model> {
+pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config, host: crate::host::HostRef) -> R<Model> {
     let mut loader = Loader::new(resolve, build_stdlib());
     loader.globals = global_defs();
     let root = loader.load(name(root_name), None)?;
     // native overrides for bundled modules
     apply_overrides(&loader);
     let ev = Evaluator::create();
+    *ev.host.borrow_mut() = host;
     let vars = tlc_variable_order(&root);
     for (i, v) in vars.iter().enumerate() {
         v.idx.set(i as i32);
