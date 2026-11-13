@@ -138,7 +138,7 @@ export class Checker {
       case 'stats': return makeRecord(['distinct', 'generated', 'queue', 'diameter', 'duration'],
         [this.states.length, this.generated, this.states.length - this.head, this.depth, 0]);
     }
-    if (k === 'revision') return makeRecord(['tag', 'count', 'timestamp', 'date', 'calver'], ['development', 0, 0, '', 'verify.js']);
+    if (k === 'revision') return makeRecord(['tag', 'count', 'timestamp', 'date', 'calver'], ['development', 0, 0, '', 'everystate']);
     if (k === 'spec') {
       // structure of TLC's TLCGet("spec"), without coverage statistics
       const m = this.model;

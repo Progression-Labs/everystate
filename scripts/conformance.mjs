@@ -1,4 +1,4 @@
-// Runs verify.js on the tlaplus/Examples corpus and compares against the results recorded in the
+// Runs everystate on the tlaplus/Examples corpus and compares against the results recorded in the
 // official manifest.json files (result kind, distinct states, total states, depth).
 // usage: node scripts/conformance.mjs EXAMPLES_DIR [--max-runtime SEC] [--timeout SEC] [--filter STR] [--jobs N]
 import fs from 'node:fs';
@@ -32,7 +32,7 @@ async function worker() {
     const c = cases[next++];
     const t0 = Date.now();
     const out = await new Promise(res => {
-      const alt = process.env.VERIFY_CMD; // alternative implementation with the same -json interface (e.g. the Rust port)
+      const alt = (process.env.EVERYSTATE_CMD ?? process.env.VERIFY_CMD); // alternative implementation with the same -json interface (e.g. the Rust port)
       const p = alt ? spawn(alt, ['-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] })
         : spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', cli, '-json', '-config', c.cfg, c.spec], { stdio: ['ignore', 'pipe', 'pipe'] });
       let o = '', e = '';

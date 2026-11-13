@@ -1,4 +1,4 @@
-# verify.js
+# everystate
 
 A TLA+ model checker written in pure TypeScript. No Java, no native code, no runtime dependencies.
 
@@ -6,8 +6,8 @@ It reads ordinary TLA+ modules and TLC configuration files, explores the state s
 does, and prints results in TLC's format, so tools written against TLC keep working.
 
 ```sh
-npx verify.js Spec.tla                 # uses Spec.cfg next to the spec
-npx verify.js -config MC.cfg -deadlock Spec.tla
+npx everystate Spec.tla                 # uses Spec.cfg next to the spec
+npx everystate -config MC.cfg -deadlock Spec.tla
 ```
 
 ```
@@ -25,7 +25,7 @@ State 2: <FillBig line 16, col 12 to line 16, col 37 of module DieHard>
 ```
 
 Runs on Node 20+ and Bun. It uses only `node:fs`, `node:path`, `node:worker_threads` and
-`node:child_process` in its CLI host; the checker itself (`import { check } from 'verify.js'`) needs
+`node:child_process` in its CLI host; the checker itself (`import { check } from 'everystate'`) needs
 no host APIs at all and runs anywhere JavaScript does.
 
 ## What it does
@@ -52,11 +52,11 @@ no host APIs at all and runs anywhere JavaScript does.
 
 ## Using it where a tool expects Java + TLC
 
-`verify-java` accepts the command line of `java -cp tla2tools.jar tlc2.TLC ...` (and of
+`everystate-java` accepts the command line of `java -cp tla2tools.jar tlc2.TLC ...` (and of
 `tla2sany.xml.XMLExporter`). Point a TLC-driving script at it instead of a JVM:
 
 ```sh
-JAVA="$(npm root)/verify.js/dist/java.js" TLA2TOOLS=unused  some-tool-that-runs-tlc Spec.tla
+JAVA="$(npm root)/everystate/dist/java.js" TLA2TOOLS=unused  some-tool-that-runs-tlc Spec.tla
 ```
 
 The pstack `statechart` skill script runs unmodified this way.
@@ -64,7 +64,7 @@ The pstack `statechart` skill script runs unmodified this way.
 ## API
 
 ```ts
-import { check, fmt } from 'verify.js';
+import { check, fmt } from 'everystate';
 
 const { result, model } = check({
   root: 'Spec',
@@ -84,7 +84,7 @@ Real TLC is the specification. Three suites compare against it:
 |---|---|---|
 | [tlaplus/Examples](https://github.com/tlaplus/Examples) manifest | result kind and exact generated / distinct state counts recorded upstream | `npm run conformance:examples -- /path/to/Examples` |
 | TLC's own `test-model` directory | outcome, state counts and trace length against a live run of `tla2tools.jar` | `npm run conformance:tlc -- /path/to/test-model` |
-| pstack `statechart` corpus | byte-identical charts and reports produced by the real script with verify.js standing in for Java | `npm run conformance:statechart -- /path/to/statechart/scripts` |
+| pstack `statechart` corpus | byte-identical charts and reports produced by the real script with everystate standing in for Java | `npm run conformance:statechart -- /path/to/statechart/scripts` |
 
 `npm test` runs the self-contained tests (no Java needed): the checker API, the value
 pretty-printer against 337 outputs recorded from the Java implementation, and the community-module

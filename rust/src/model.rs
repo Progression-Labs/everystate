@@ -367,10 +367,7 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
             };
             match s {
                 Sym::Decl(d) if !d.is_var => d.subst.set(Some(target)),
-                Sym::Def(d) => {
-                    d.over.set(Some(target));
-                    d.over_scoped.set(c.module.is_some());
-                }
+                Sym::Def(d) => d.over.set(Some(target)),
                 _ => {}
             }
         } else {
@@ -385,7 +382,6 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config) -> R<
                     let o = Def::new(d.name, vec![], None, d.module, false, d.loc);
                     o.builtin.set(Some(leak(Builtin { f: BFn::Const(c.value.clone().unwrap()), ops: 0, lazy: false })));
                     d.over.set(Some(leak(o)));
-                    d.over_scoped.set(c.module.is_some());
                 }
                 _ => {}
             }

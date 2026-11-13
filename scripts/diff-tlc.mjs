@@ -1,4 +1,4 @@
-// Differential test: run the reference Java TLC and verify.js on every (spec, cfg) pair found under a
+// Differential test: run the reference Java TLC and everystate on every (spec, cfg) pair found under a
 // directory and compare outcome class and state counts.
 // usage: node scripts/diff-tlc.mjs DIR [--jar tla2tools.jar] [--timeout SEC] [--jobs N] [--filter STR] [--cache FILE]
 import fs from 'node:fs';

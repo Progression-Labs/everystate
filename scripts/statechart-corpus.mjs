@@ -1,4 +1,4 @@
-// Runs the (unmodified) pstack `statechart` skill script on its own test corpus, but with verify.js
+// Runs the (unmodified) pstack `statechart` skill script on its own test corpus, but with everystate
 // standing in for Java+TLC, and compares the chart and report with the committed expectations.
 // usage: node scripts/statechart-corpus.mjs /path/to/pstack/skills/statechart/scripts [--filter STR] [--show]
 import fs from 'node:fs';

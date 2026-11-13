@@ -88,11 +88,11 @@ export function runCli(argv: string[], host: Host): void {
       else dump = { file: x, dot: false, opts: '' };
     } else if (a === '-dumpTrace' || a === '-loadTrace') i += 2;
     else if (a === '-simulate' || a === '-generate') {
-      host.stdout('Error: simulation mode is not supported by verify.js yet.\n');
+      host.stdout('Error: simulation mode is not supported by everystate yet.\n');
       host.exit(1);
       return;
     } else if (a === '-h' || a === '-help' || a === '--help') { host.stdout(USAGE); host.exit(0); return; }
-    else if (a === '-version' || a === '--version') { host.stdout(`verify.js ${VERSION}\n`); host.exit(0); return; }
+    else if (a === '-version' || a === '--version') { host.stdout(`everystate ${VERSION}\n`); host.exit(0); return; }
     else if (ARITY1.has(a)) i++;
     else if (a.startsWith('-')) { /* flag without effect here (-cleanup, -nowarning, -terse, -noTE, ...) */ }
     else if (spec !== null) { host.stdout(`Error: more than one input files: ${spec} and ${a}\n`); host.exit(1); return; }
@@ -128,8 +128,8 @@ export function runCli(argv: string[], host: Host): void {
   };
   resetInterning();
   if (!json) {
-    rep.msg(2262, 0, `TLC2 Version 2.19 of 08 August 2024 (verify.js ${VERSION})`);
-    rep.msg(2187, 0, `Running breadth-first search Model-Checking with fp 0 and seed 0 with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (verify.js ${VERSION}, pure TypeScript, HashFPSet, MemStateQueue).`);
+    rep.msg(2262, 0, `TLC2 Version 2.19 of 08 August 2024 (everystate ${VERSION})`);
+    rep.msg(2187, 0, `Running breadth-first search Model-Checking with fp 0 and seed 0 with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (everystate ${VERSION}, pure TypeScript, HashFPSet, MemStateQueue).`);
   }
   let model: Model;
   try {
@@ -326,7 +326,7 @@ function writeDump(model: Model, checker: Checker, dump: { file: string; dot: bo
   host.fs.writeFileSync(dump.file.endsWith('.dot') ? dump.file : dump.file + '.dot', lines.join('\n') + '\n');
 }
 
-const USAGE = `verify.js ${VERSION} - a TLA+ model checker in pure TypeScript (TLC-compatible command line)
+const USAGE = `everystate ${VERSION} - a TLA+ model checker in pure TypeScript (TLC-compatible command line)
 
 Usage: verify [options] SPEC[.tla]
 
@@ -397,7 +397,7 @@ export function runXmlExporter(argv: string[], host: Host): void {
 }
 
 // Emulates the `java` command line of the TLA+ tools, so that scripts which shell out to
-// `java -cp tla2tools.jar tlc2.TLC ...` can run on verify.js unchanged.
+// `java -cp tla2tools.jar tlc2.TLC ...` can run on everystate unchanged.
 export function runJavaShim(argv: string[], host: Host): void {
   const libs: string[] = [...(host.libraryPaths ?? [])];
   let i = 0;
@@ -413,5 +413,5 @@ export function runJavaShim(argv: string[], host: Host): void {
   if (main === 'tlc2.TLC') runCli(rest, h);
   else if (main === 'tla2sany.xml.XMLExporter') runXmlExporter(rest, h);
   else if (main === 'tla2sany.SANY') runXmlExporter(['-quiet', ...rest], { ...h, stdout: () => {} });
-  else { host.stdout(`verify.js java shim: unsupported main class ${main ?? '(none)'}\n`); host.exit(1); }
+  else { host.stdout(`everystate java shim: unsupported main class ${main ?? '(none)'}\n`); host.exit(1); }
 }

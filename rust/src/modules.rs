@@ -50,7 +50,6 @@ pub struct Def {
     pub cache: RefCell<Option<Value>>,
     pub level: Cell<i8>,
     pub over: Cell<Option<&'static Def>>, // config replacement (Op <- Other)
-    pub over_scoped: Cell<bool>,           // the replacement was given with a module scope (Op = [M]v)
     pub refs: RefCell<Option<Rc<RefCell<HashSet<Name>>>>>,
     pub enabled_only: RefCell<Vec<Option<bool>>>,
 }
@@ -68,7 +67,6 @@ impl Def {
             cache: RefCell::new(None),
             level: Cell::new(-1),
             over: Cell::new(None),
-            over_scoped: Cell::new(false),
             refs: RefCell::new(None),
             enabled_only: RefCell::new(Vec::new()),
         }

@@ -1,13 +1,12 @@
 {
-  "name": "verify.js",
+  "name": "everystate",
   "version": "0.1.0",
   "description": "A TLA+ model checker (TLC-compatible) written in pure TypeScript. No Java.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "verify": "dist/cli.js",
-    "verify-java": "dist/java.js",
-    "verify.js": "dist/cli.js"
+    "everystate": "dist/cli.js",
+    "everystate-java": "dist/java.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
