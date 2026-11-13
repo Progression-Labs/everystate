@@ -131,10 +131,20 @@ pub enum E {
     TQuant { names: Vec<Name>, body: Box<Node> },
 }
 
+/// What a locally resolved name refers to, when that is a function definition or a zero-argument LET definition.
+#[derive(Copy, Clone)]
+pub enum LocalDef {
+    Fn,                      // the enclosing recursive function itself
+    Let(&'static DefNode), // a LET definition without parameters
+}
+
 pub struct Node {
     pub loc: Loc,
     pub module: Cell<Option<Name>>,
     pub lvl: Cell<i8>,
+    pub tf: Cell<i8>,                    // cache of modules::tail_fn (-1 unknown)
+    pub op_arg: Cell<bool>,              // a bare operator name where an operator argument is expected
+    pub ld: Cell<Option<LocalDef>>,      // App resolved to a local definition
     pub junction: bool,
     pub paren: bool,
     pub e: E,
@@ -142,7 +152,7 @@ pub struct Node {
 
 impl Node {
     pub fn new(loc: Loc, e: E) -> Node {
-        Node { loc, module: Cell::new(None), lvl: Cell::new(-1), junction: false, paren: false, e }
+        Node { loc, module: Cell::new(None), lvl: Cell::new(-1), tf: Cell::new(-1), op_arg: Cell::new(false), ld: Cell::new(None), junction: false, paren: false, e }
     }
     pub fn is_k(&self, k: K) -> bool {
         matches!(&self.e, E::Op(k2, _) if *k2 == k)

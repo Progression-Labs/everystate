@@ -52,6 +52,26 @@ impl std::fmt::Display for Name {
     }
 }
 
+thread_local! {
+    static MV_TYPES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+/// Type letter of a typed model value ("a_1" has type 'a'); None for untyped ones. Cached per string id.
+pub fn model_type(id: StrId) -> Option<u8> {
+    MV_TYPES.with(|c| {
+        let mut c = c.borrow_mut();
+        let i = id.0 as usize;
+        if i >= c.len() {
+            c.resize(i + 1, 255);
+        }
+        if c[i] == 255 {
+            let s = str_of(id);
+            let b = s.as_bytes();
+            c[i] = if b.len() > 2 && b[1] == b'_' { b[0] } else { 0 };
+        }
+        if c[i] == 0 { None } else { Some(c[i]) }
+    })
+}
+
 pub type Loc = [u32; 4];
 
 #[derive(Debug, Clone)]

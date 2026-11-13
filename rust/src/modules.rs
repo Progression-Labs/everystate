@@ -52,6 +52,7 @@ pub struct Def {
     pub over: Cell<Option<&'static Def>>, // config replacement (Op <- Other)
     pub over_scoped: Cell<bool>,           // the replacement was given with a module scope (Op = [M]v)
     pub refs: RefCell<Option<Rc<RefCell<HashSet<Name>>>>>,
+    pub enabled_only: RefCell<Vec<Option<bool>>>,
 }
 impl Def {
     pub fn new(name: Name, params: Vec<Param>, body: Option<N>, module: Name, local: bool, loc: Loc) -> Def {
@@ -69,6 +70,7 @@ impl Def {
             over: Cell::new(None),
             over_scoped: Cell::new(false),
             refs: RefCell::new(None),
+            enabled_only: RefCell::new(Vec::new()),
         }
     }
     #[inline]
@@ -147,7 +149,7 @@ pub struct ModuleInfo {
 
 pub type SourceResolver = Box<dyn Fn(&str) -> Option<String>>;
 
-type Scope = Vec<(Name, bool)>;
+type Scope = Vec<(Name, bool, Option<LocalDef>)>;
 
 pub struct Loader {
     pub modules: HashMap<Name, Rc<ModuleInfo>>,
@@ -414,7 +416,7 @@ impl Loader {
         }
         // pass 2: resolve names
         for d in info.own_defs.clone() {
-            let mut scope: Scope = d.params.iter().map(|p| (p.name, false)).collect();
+            let mut scope: Scope = d.params.iter().map(|p| (p.name, false, None)).collect();
             let body = d.body.get().unwrap();
             if let Err(e) = self.resolve(body, &mut scope, &info) {
                 // Theorems may mention things we do not model (proof-only constructs); ignore them.
@@ -430,8 +432,11 @@ impl Loader {
             }
         }
         for (u, substs) in resolve_later {
-            let mut scope: Scope = u.params.iter().map(|p| (p.name, false)).collect();
+            let mut scope: Scope = u.params.iter().map(|p| (p.name, false, None)).collect();
             for s in substs.iter() {
+                if matches!(s.e.e, E::App { .. }) {
+                    s.e.op_arg.set(true);
+                }
                 self.resolve(s.e, &mut scope, &info)?;
             }
         }
@@ -455,9 +460,9 @@ impl Loader {
         let mark = scope.len();
         fn push_bound(scope: &mut Scope, b: &Bound) {
             if let Some(ns) = &b.names {
-                scope.extend(ns.iter().map(|x| (*x, false)));
+                scope.extend(ns.iter().map(|x| (*x, false, None)));
             } else if let Some(t) = &b.tuple {
-                scope.extend(t.iter().map(|x| (*x, false)));
+                scope.extend(t.iter().map(|x| (*x, false, None)));
             }
         }
         match &n.e {
@@ -466,14 +471,40 @@ impl Loader {
                 if let Some(e) = scope.iter_mut().rev().find(|e| e.0 == *nm) {
                     e.1 = true;
                     r.set(Res::Local);
+                    if e.2.is_some() {
+                        n.ld.set(e.2);
+                    }
                 } else {
-                    match m.syms.get(*nm).or_else(|| self.globals.get(*nm)) {
-                        Some(Sym::Decl(d)) => r.set(Res::Decl(d)),
-                        Some(Sym::Def(d)) => r.set(Res::Def(d)),
+                    let sym = match m.syms.get(*nm).or_else(|| self.globals.get(*nm)) {
+                        Some(s) => s,
                         None => return sem_err(format!("Unknown operator: `{}'.", nm), Some(n.loc), m.name.unwrap()),
+                    };
+                    let want = match sym {
+                        Sym::Decl(d) => {
+                            r.set(Res::Decl(d));
+                            if d.is_var { 0 } else { d.arity }
+                        }
+                        Sym::Def(d) => {
+                            r.set(Res::Def(d));
+                            d.resolved().params.len()
+                        }
+                    };
+                    // arity check (a bare operator name is fine where an operator argument is expected)
+                    if sel.is_none() && args.len() != want && !(args.is_empty() && n.op_arg.get()) {
+                        let l = n.loc;
+                        return sem_err(
+                            format!("line {}, col {} to line {}, col {} of module {}\n\nThe operator {} requires {} arguments.", l[0], l[1], l[2], l[3], m.name.unwrap(), nm, want),
+                            Some(n.loc),
+                            m.name.unwrap(),
+                        );
                     }
                 }
                 for a in args {
+                    if let E::App { args: aa, .. } = &a.e {
+                        if aa.is_empty() {
+                            a.op_arg.set(true);
+                        }
+                    }
                     self.resolve(a, scope, m)?;
                 }
                 if let Some(sel) = sel {
@@ -506,7 +537,7 @@ impl Loader {
                     push_bound(scope, b);
                 }
                 if let Some(rn) = recname {
-                    scope.push((*rn, false));
+                    scope.push((*rn, false, Some(LocalDef::Fn)));
                 }
                 self.resolve(body, scope, m)?;
                 if let Some(rn) = recname {
@@ -530,11 +561,11 @@ impl Loader {
                 self.resolve(pred, scope, m)?;
             }
             E::TQuant { names, body } => {
-                scope.extend(names.iter().map(|x| (*x, false)));
+                scope.extend(names.iter().map(|x| (*x, false, None)));
                 self.resolve(body, scope, m)?;
             }
             E::Lambda { params, body } => {
-                scope.extend(params.iter().map(|p| (p.name, false)));
+                scope.extend(params.iter().map(|p| (p.name, false, None)));
                 self.resolve(body, scope, m)?;
             }
             E::Let { defs, body } => {
@@ -574,19 +605,32 @@ impl Loader {
                         }
                     }
                 }
-                scope.extend(names.iter().map(|x| (*x, false)));
+                let let_start = scope.len();
+                scope.extend(names.iter().map(|x| (*x, false, None)));
+                for d in defs {
+                    if let LetDef::Def(d) = d {
+                        if d.params.is_empty() {
+                            if let Some(e) = scope[let_start..].iter_mut().rev().find(|e| e.0 == d.name) {
+                                e.2 = Some(LocalDef::Let(d));
+                            }
+                        }
+                    }
+                }
                 let s = scope.len();
                 for d in defs {
                     match d {
                         LetDef::Inst(d) => {
-                            scope.extend(d.params.iter().map(|p| (p.name, false)));
+                            scope.extend(d.params.iter().map(|p| (p.name, false, None)));
                             for x in d.inst_substs.get().unwrap().iter() {
+                                if matches!(x.e.e, E::App { .. }) {
+                                    x.e.op_arg.set(true);
+                                }
                                 self.resolve(x.e, scope, m)?;
                             }
                             scope.truncate(s);
                         }
                         LetDef::Def(d) => {
-                            scope.extend(d.params.iter().map(|p| (p.name, false)));
+                            scope.extend(d.params.iter().map(|p| (p.name, false, None)));
                             self.resolve(&d.body, scope, m)?;
                             // keep `used` marks of outer names; drop the parameter frame
                             scope.truncate(s);
@@ -665,8 +709,16 @@ pub fn level_of(n: N) -> i8 {
                 Res::Def(d) => l = def_level(d),
                 _ => {}
             }
-            for a in args {
-                up!(a);
+            for (i, a) in args.iter().enumerate() {
+                // an action argument that the operator only uses under ENABLED contributes state level
+                let only_enabled = level_of(a) == 2 && l < 2 && matches!(r.get(), Res::Def(d) if param_only_enabled(d, i));
+                if only_enabled {
+                    if l < 1 {
+                        l = 1;
+                    }
+                } else {
+                    up!(a);
+                }
             }
         }
         E::Op(k, a) => match k {
@@ -918,4 +970,90 @@ pub fn for_children(n: N, f: &mut dyn FnMut(N)) {
         E::Dot { e, .. } => f(e),
         E::Lambda { body, .. } | E::TQuant { body, .. } => f(body),
     }
+}
+
+/// Can evaluating `n` yield a function constructor directly (through IF/CASE/LET/definitions)? TLC keeps such a
+/// function unevaluated when it is immediately applied (f[x]) or is the body of a recursive function.
+pub fn tail_fn(n: N) -> bool {
+    let c = n.tf.get();
+    if c >= 0 {
+        return c == 1;
+    }
+    n.tf.set(0); // recursion guard
+    let r = match &n.e {
+        E::FnDef { .. } => true,
+        E::Op(K::If, a) => tail_fn(&a[1]) || tail_fn(&a[2]),
+        E::Case { arms, other } => arms.iter().any(|(_, e)| tail_fn(e)) || other.as_ref().map_or(false, |o| tail_fn(o)),
+        E::Let { body, .. } => tail_fn(body),
+        E::FnApp { f, .. } => tail_fn(f),
+        E::App { args, sel, r, .. } if sel.is_none() => match r.get() {
+            Res::Local => match n.ld.get() {
+                Some(LocalDef::Fn) if args.is_empty() => true,
+                Some(LocalDef::Let(d)) if args.is_empty() => tail_fn(&d.body),
+                _ => false,
+            },
+            Res::Def(x) => {
+                let mut d = x.resolved();
+                while let Some(inst) = &d.inst {
+                    d = inst.orig.resolved();
+                }
+                match d.body.get() {
+                    Some(b) if d.builtin.get().is_none() => tail_fn(b),
+                    _ => false,
+                }
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    n.tf.set(r as i8);
+    r
+}
+
+/// Does definition `d0` use its i-th parameter only inside ENABLED?
+fn param_only_enabled(d0: &'static Def, i: usize) -> bool {
+    let mut d = d0.resolved();
+    let mut skip = 0;
+    while let Some(inst) = &d.inst {
+        skip += inst.nparams;
+        d = inst.orig.resolved();
+    }
+    if i < skip {
+        return false;
+    }
+    let i = i - skip;
+    let body = match d.body.get() {
+        Some(b) if i < d.params.len() => b,
+        _ => return false,
+    };
+    if let Some(Some(v)) = d.enabled_only.borrow().get(i) {
+        return *v;
+    }
+    let pname = d.params[i].name;
+    let mut used = false;
+    fn walk(x: N, pname: Name, used: &mut bool) -> bool {
+        if x.is_k(K::Enabled) {
+            *used = true;
+            return true;
+        }
+        if let E::App { name, r, .. } = &x.e {
+            if *name == pname && matches!(r.get(), Res::Local) {
+                return false;
+            }
+        }
+        let mut ok = true;
+        for_children(x, &mut |c| {
+            if ok && !walk(c, pname, used) {
+                ok = false;
+            }
+        });
+        ok
+    }
+    let v = walk(body, pname, &mut used) && used;
+    let mut c = d.enabled_only.borrow_mut();
+    if c.len() <= i {
+        c.resize(i + 1, None);
+    }
+    c[i] = Some(v);
+    v
 }
