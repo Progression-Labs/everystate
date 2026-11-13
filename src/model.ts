@@ -112,6 +112,22 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
       s.override = { k: 'def', name: s.name, params: [], body: null, module: s.module, local: false, loc: s.loc, builtin: { fn: () => value } };
     }
   }
+  // A constant replaced by a definition that is not constant-level (TLC evaluates the replacement at startup).
+  for (const c of cfg.constants) {
+    if (c.subst === undefined) continue;
+    const s = (c.module ? loader.modules.get(c.module) : root)?.syms.get(c.name);
+    if (!s || s.k !== 'const' || !s.subst || s.subst.params.length !== 0 || s.subst.builtin) continue;
+    const s0 = ev.stTouch;
+    try {
+      ev.cur = []; ev.nxt = null; ev.initMode = false;
+      ev.eval(mkApp(c.subst, s.subst), null);
+    } catch (e) {
+      if (!(e instanceof TlaError)) { if (e instanceof RangeError) continue; throw e; }
+      if (defLevel(s.subst) > 0 || ev.stTouch !== s0) {
+        throw new ConfigError(`The configuration file substitutes constant ${c.name} with non-constant ${c.subst} - specifically: ${e.message}`);
+      }
+    }
+  }
   for (const c of root.consts) {
     if (!c.hasValue && !c.subst) {
       throw new ConfigError(`The constant parameter ${c.name} is not assigned a value by the configuration file.`);
@@ -214,7 +230,9 @@ export function buildModel(rootName: string, resolve: SourceResolver, cfg: Confi
       nextPred = { e: mkApp(cfg.next, d), ctx: null, name: cfg.next };
     }
   }
-  const noBehavior = cfg.spec === undefined && cfg.init === undefined && cfg.next === undefined;
+  // a specification without variables has no behaviours to explore: TLC only checks the assumptions
+  if (vars.length === 0) { model.inits.length = 0; nextPred = null; }
+  const noBehavior = (cfg.spec === undefined && cfg.init === undefined && cfg.next === undefined) || vars.length === 0;
   if (model.inits.length === 0 && !noBehavior) throw new ConfigError('The configuration file did not specify the initial state predicate.');
   if (!nextPred && cfg.spec === undefined && !noBehavior) throw new ConfigError('The configuration file did not specify the next state predicate.');
 

@@ -612,6 +612,9 @@ export function modelCheck(model: Model, opts: CheckOptions): { result: CheckRes
       if (!(e instanceof TlaError)) throw e;
       return { result: checker.result('error', { message: e.message, printSummary: false }), checker };
     }
+    if (branches === 0) {
+      return { result: checker.result('error', { code: 2253, message: 'Temporal formula is a tautology (its negation is unsatisfiable).', printSummary: false }), checker };
+    }
     opts.onLiveness?.('branches', branches);
   }
   let result = checker.run();

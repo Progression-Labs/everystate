@@ -8,6 +8,7 @@ import {
 } from './values.ts';
 import type { Value } from './values.ts';
 import { TlaError } from './lexer.ts';
+import { ppr } from './pprint.ts';
 
 export class Ctx {
   name: string;
@@ -62,6 +63,10 @@ export class LazyFcn {
     this.ctx = node.recname ? cons(node.recname, this, ctx) : ctx;
   }
   describe(): string { return '<lazy function>'; }
+  show(): string {
+    try { const f = this.force(); if (f !== this) return ppr(fmt(f)); } catch (e) { if (!(e instanceof TlaError)) throw e; }
+    return this.describe();
+  }
   bind(arg: Value): Ctx | null {
     const ev = this.ev;
     const bounds = this.node.bounds as Bound[];
@@ -70,7 +75,7 @@ export class LazyFcn {
     if (one) {
       const b = bounds[0];
       const s = ev.evalSet(b.set!, this.ctx);
-      if (!s.contains(arg)) throw new EvalError(`Attempted to apply function to argument ${fmt(arg)}, which is not in the domain of the function.`);
+      if (!s.contains(arg)) throw new EvalError(`In applying the function\n${this.show()},\nthe first argument is:\n${ppr(fmt(arg))}\nwhich is not in its domain.\n`);
       c = b.tuple ? ev.bindTuple(b.tuple, arg, c) : cons(b.names![0], arg, c);
     } else {
       if (!(arg instanceof TupleV)) throw new EvalError(`Attempted to apply function to argument ${fmt(arg)}, which is not in the domain of the function.`);
@@ -262,13 +267,15 @@ export class Evaluator {
   }
 
   // Expand a definition application into (body, context) without evaluating it.
-  expandDef(def: Def, thunks: any[], base: Ctx | null): { body: Node; ctx: Ctx | null } | null {
-    if (def.override) def = def.override;
+  expandDef(def: Def, thunks: any[], base: Ctx | null, viaInstance = false): { body: Node; ctx: Ctx | null } | null {
+    // A config override (Op <- Other) replaces references to Op itself; an instantiated copy (I!Op) keeps the
+    // original body, as in TLC where the override is attached to the definition node, not to its body.
+    if (def.override && !(viaInstance && !def.override.builtin)) def = def.override;
     if (def.builtin) return null;
     if (def.inst) {
       const env = this.buildEnv(def, thunks, base);
       const rest = def.inst.nparams ? thunks.slice(def.inst.nparams) : thunks;
-      const r = this.expandDef(def.inst.orig, rest, env);
+      const r = this.expandDef(def.inst.orig, rest, env, true);
       return r;
     }
     const ps = def.params;
@@ -403,7 +410,7 @@ export class Evaluator {
           if (idx >= 0) {
             const v = this.cur[idx];
             this.prTouch++;
-            if (v === undefined) return this.fail(`In evaluation, the identifier ${r.name} is either undefined or an operator.`, n);
+            if (v === undefined) return this.fail(`In evaluation, the identifier ${r.name} is either undefined or not an operator.`, n);
             return v;
           }
         }
@@ -417,8 +424,8 @@ export class Evaluator {
       if (this.primeDepth > 0) this.prTouch++; else this.stTouch++;
       if (v === undefined) {
         return this.fail(this.primeDepth > 0
-          ? `In evaluation, the identifier ${r.name} is either undefined or an operator.` // primed variable not yet assigned
-          : `In evaluation, the identifier ${r.name} is either undefined or an operator.`, n);
+          ? `In evaluation, the identifier ${r.name} is either undefined or not an operator.` // primed variable not yet assigned
+          : `In evaluation, the identifier ${r.name} is either undefined or not an operator.`, n);
       }
       return v;
     }
@@ -540,8 +547,11 @@ export class Evaluator {
         return !this.evalSet(n.a[1], ctx).contains(x);
       }
       case O_subseteq: {
-        const a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
+        let a = this.evalSet(n.a[0], ctx), b = this.evalSet(n.a[1], ctx);
+        // SUBSET A \subseteq SUBSET B  iff  A \subseteq B
+        while (a instanceof SubsetV && b instanceof SubsetV) { a = a.base; b = b.base; }
         if (!a.enumerable()) return this.fail(`Attempted to check if the non-enumerable set ${fmt(a)} is a subset of ${fmt(b)}`, n);
+        if (a instanceof IntervalV && b instanceof IntervalV) return a.hi < a.lo || (a.lo >= b.lo && a.hi <= b.hi);
         for (const x of a.elems()) if (!b.contains(x)) return false;
         return true;
       }
@@ -968,10 +978,7 @@ export class Evaluator {
         if (b instanceof Lazy) {
           if (base.name === ENABLED_MARK) {
             // Like TLC's context cut-off: a variable of an instantiated module that is reached from inside an
-            // ENABLED evaluated in that module stands for itself, not for the expression substituted for it
-            // (TLC identifies it by name, so it coincides with a root variable of the same name).
-            const same = this.varNames.indexOf(e.name);
-            if (same >= 0) return same;
+            // ENABLED evaluated in that module stands for itself, not for the expression substituted for it.
             let si = this.scratch.get(r);
             if (si === undefined) { si = this.nvars + this.scratch.size; this.scratch.set(r, si); }
             return si;
@@ -1173,7 +1180,7 @@ export class Evaluator {
         if (nxt[idx] === undefined) {
           const v = idx >= this.nvars ? this.eval(e, ctx) : this.cur[idx];
           this.stTouch++;
-          if (v === undefined) this.fail(`In evaluation, the identifier ${this.varNames[idx]} is either undefined or an operator.`, e);
+          if (v === undefined) this.fail(`In evaluation, the identifier ${this.varNames[idx]} is either undefined or not an operator.`, e);
           nxt[idx] = v;
           this.nAssigned++;
           try { k(); } finally { nxt[idx] = undefined; this.nAssigned--; }

@@ -1,7 +1,7 @@
 // Native implementations of the TLA+ standard modules.
 import type { Def, ModuleInfo, Builtin } from './modules.ts';
 import type { Evaluator } from './eval.ts';
-import { Closure, DefRef } from './eval.ts';
+import { Closure, DefRef, Lazy } from './eval.ts';
 import {
   EvalError, SetBase, SetV, IntervalV, InfSetV, SeqSetV, LazySetV, CrossV, RecSetV, FcnSetV, TupleV, RecordV, FcnV, ModelValue, modelValue,
   valEq, compare, mkSet, BOOLEAN_SET, makeFcn, makeFcnFromPairs, domainElems, fcnValues, isFcn, fmt, EMPTY_TUPLE, bsearch,
@@ -157,11 +157,14 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
         if (emptyProduct(s)) return 0;
         fail(`Attempted to compute the cardinality of the infinite set ${fmt(s)}`);
       }
-      return s.size();
+      const n = s.size();
+      if (n > 2147483647) fail(`Attempted to apply the operator overridden by the Java method\npublic static tlc2.value.impl.IntValue tlc2.module.FiniteSets.Cardinality(tlc2.value.impl.Value),\nbut it produced the following error:\nOverflow when computing the number of elements in:\n${fmt(s)}`);
+      return n;
     }],
   });
 
   const registers = new Map<number | string, Value>();
+  const tlcCache = new Map<object, Map<string, Value>>();
   const TLC = module('TLC', [], {
     'Print': [2, (_, a) => { io.print(`${fmt(a[0])}  ${fmt(a[1])}`); return a[1]; }],
     'PrintT': [1, (_, a) => { io.print(fmt(a[0])); return true; }],
@@ -273,7 +276,17 @@ export function buildStdlib(io: { print: (s: string) => void }): Map<string, Mod
     'TLCDefer': [1, () => true],
     'PickSuccessor': [1, () => true],
     'TLCNoOp': [1, (_, a) => a[0]],
-    'TLCCache': [2, (_, a) => a[0]],
+    // TLCCache(expr, closure): expr is evaluated once per (occurrence, closure value)
+    'TLCCache': [2, (ev, a) => {
+      const node = a[0] instanceof Lazy ? a[0].e : null;
+      if (!node) return ev.unthunk(a[0]);
+      const key = fmt(ev.unthunk(a[1]));
+      let m = tlcCache.get(node);
+      if (!m) { m = new Map(); tlcCache.set(node, m); }
+      let v = m.get(key);
+      if (v === undefined) { v = ev.unthunk(a[0]); m.set(key, v); }
+      return v;
+    }, { lazy: true }],
     'TLCGetOrDefault': [2, (_, a) => registers.get(int(a[0], 'TLCGetOrDefault', 0)) ?? a[1]],
     'TLCGetAndSet': [4, (ev, a) => {
       const old = registers.get(int(a[0], 'TLCGetAndSet', 0)) ?? a[3];
