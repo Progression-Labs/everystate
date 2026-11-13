@@ -18,7 +18,7 @@ export function runEntry(entryUrl: string, main: (argv: string[], host: Host) =>
     }
     return;
   }
-  if (!isNode || process.env.VERIFY_NO_WORKER) { main(process.argv.slice(2), nodeHost()); return; }
+  if (!isNode || process.env.EVERYSTATE_NO_WORKER) { main(process.argv.slice(2), nodeHost()); return; }
   const heapMb = Math.max(2048, Math.min(16384, Math.floor(os.totalmem() / 1048576 * 0.75)));
   const w = new Worker(new URL(entryUrl), {
     workerData: { verifyEntry: true, argv: process.argv.slice(2) },
@@ -28,7 +28,7 @@ export function runEntry(entryUrl: string, main: (argv: string[], host: Host) =>
   w.on('message', m => { if (m && typeof m.exit === 'number') process.exitCode = m.exit; });
   w.on('error', e => {
     const msg = (e as { code?: string }).code === 'ERR_WORKER_OUT_OF_MEMORY'
-      ? 'Error: verify.js ran out of memory while exploring the state space.'
+      ? 'Error: everystate ran out of memory while exploring the state space.'
       : `Error: ${e && (e as Error).stack ? (e as Error).stack : e}`;
     process.stdout.write(msg + '\n');
     process.exitCode = 255;

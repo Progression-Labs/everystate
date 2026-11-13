@@ -9,6 +9,7 @@ mod lexer;
 mod model;
 mod modules;
 mod parser;
+mod pprint;
 mod stdlib;
 mod value;
 

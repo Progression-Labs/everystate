@@ -128,6 +128,131 @@ fn bag_n(v: &Value) -> i64 {
         _ => 0,
     }
 }
+fn bag_add(x: i64, y: i64) -> R<i64> {
+    let r = x + y;
+    if r > 2147483647 || r < -2147483648 {
+        return fail(format!("Overflow when computing {}+{}", x, y));
+    }
+    Ok(r)
+}
+/// A product / function set / record set that an empty component makes empty although another one is infinite.
+fn empty_product(x: &SetV) -> bool {
+    fn empty(y: &SetV) -> bool {
+        match &y.k {
+            SetK::Interval(lo, hi) => hi < lo,
+            SetK::Enum(e) => e.is_empty(),
+            _ => empty_product(y),
+        }
+    }
+    match &x.k {
+        SetK::Cross(ss) | SetK::RecSet(_, ss) => ss.iter().any(|s| empty(s)),
+        SetK::FcnSet(d, r) => empty(r) && !empty(d),
+        _ => false,
+    }
+}
+/// A set known to be empty without enumerating it (components are asked in order, like TLC).
+fn known_empty(x: &SetV) -> R<bool> {
+    Ok(match &x.k {
+        SetK::Cross(ss) | SetK::RecSet(_, ss) => {
+            for s in ss {
+                if known_empty(s)? {
+                    return Ok(true);
+                }
+            }
+            false
+        }
+        SetK::FcnSet(d, r) => known_empty(r)? && !known_empty(d)?,
+        SetK::Interval(lo, hi) => hi < lo,
+        SetK::Enum(e) => e.is_empty(),
+        SetK::Inf(_) => false,
+        _ => x.enumerable() && x.size()? == 0,
+    })
+}
+/// A uniformly drawn element of a non-empty finite set, without enumerating products and function sets.
+fn random_elem(ev: &Evaluator, x: &SetV) -> R<Value> {
+    let rnd = |n: i64| -> i64 { ((ev.random() * n as f64) as i64).min(n - 1) };
+    Ok(match &x.k {
+        SetK::Interval(lo, hi) => Value::Int(lo + rnd(hi - lo + 1)),
+        SetK::Cross(ss) => {
+            let mut t = vec![];
+            for c in ss {
+                t.push(random_elem(ev, c)?);
+            }
+            Value::Tuple(Rc::new(t))
+        }
+        SetK::RecSet(names, ss) => {
+            let mut t = vec![];
+            for c in ss {
+                t.push(random_elem(ev, c)?);
+            }
+            Value::Record(Rc::new(RecordV { names: names.clone(), vals: t }))
+        }
+        SetK::FcnSet(d, r) => {
+            let de = d.elems()?;
+            let mut t = vec![];
+            for _ in de {
+                t.push(random_elem(ev, r)?);
+            }
+            make_fcn(de, t)
+        }
+        _ => {
+            let e = x.elems()?;
+            e[rnd(e.len() as i64) as usize].clone()
+        }
+    })
+}
+fn finite_set<'a>(v: &'a Value, op: &str, i: usize, what: &str) -> R<&'a Rc<SetV>> {
+    if let Value::Set(s) = v {
+        if known_empty(s)? || s.enumerable() {
+            return Ok(s);
+        }
+    }
+    fail(format!("The {} argument of {} should be a {}, but instead it is:\n{}", ORD[i], op, what, fmt(v)))
+}
+fn card_of(x: &SetV) -> R<i64> {
+    if known_empty(x)? { Ok(0) } else { x.size() }
+}
+fn random_subset(ev: &Evaluator, k: i64, x: &SetV) -> R<Value> {
+    let n = card_of(x)?;
+    if n == 0 {
+        return mk_set(vec![]);
+    }
+    if k >= n {
+        return mk_set(x.elems()?.to_vec());
+    }
+    if n <= 4 * k || n <= 64 {
+        let mut e = x.elems()?.to_vec();
+        for i in (1..e.len()).rev() {
+            let j = ((ev.random() * (i + 1) as f64) as usize).min(i);
+            e.swap(i, j);
+        }
+        e.truncate(k as usize);
+        return mk_set(e);
+    }
+    let mut out: Vec<Value> = vec![];
+    while (out.len() as i64) < k {
+        for _ in out.len() as i64..k {
+            out.push(random_elem(ev, x)?);
+        }
+        out = sort_dedup(out)?;
+    }
+    Ok(SetV::of(out))
+}
+fn random_set_of_subsets(ev: &Evaluator, picks: i64, p: f64, x: &SetV) -> R<Value> {
+    let e = x.elems()?;
+    let mut out = vec![];
+    for _ in 0..picks {
+        out.push(SetV::of(e.iter().filter(|_| ev.random() < p).cloned().collect()));
+    }
+    mk_set(out)
+}
+fn too_many_picks(picks: i64, n: i64, op: &str) -> R<()> {
+    let bits = 64 - (picks.max(0) as u64).leading_zeros() as i64;
+    if bits > n && (n >= 62 || picks > (1i64 << n)) {
+        return fail(format!("The first argument of {} should be a nonnegative integer that is smaller than the subset's size of 2^{}, but instead it is:\n{}", op, n, picks));
+    }
+    Ok(())
+}
 fn mk_bag(m: Vec<(Value, i64)>) -> R<Value> {
     make_fcn_from_pairs(m.into_iter().filter(|p| p.1 > 0).map(|(d, n)| (d, Value::Int(n))).collect())
 }
@@ -145,7 +270,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 return Ok(Value::Int(r));
             }
         }
-        check_int(int(&a[0], "+", 0)? + int(&a[1], "+", 1)?, || format!("{} + {}", fmt(&a[0]), fmt(&a[1])))
+        check_int(int(&a[0], "+", 0)? + int(&a[1], "+", 1)?, || format!("{}+{}", fmt(&a[0]), fmt(&a[1])))
     });
     m.op("-", 2, |_, a| {
         if let (Value::Int(x), Value::Int(y)) = (&a[0], &a[1]) {
@@ -154,16 +279,16 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 return Ok(Value::Int(r));
             }
         }
-        check_int(int(&a[0], "-", 0)? - int(&a[1], "-", 1)?, || format!("{} - {}", fmt(&a[0]), fmt(&a[1])))
+        check_int(int(&a[0], "-", 0)? - int(&a[1], "-", 1)?, || format!("{}-{}", fmt(&a[0]), fmt(&a[1])))
     });
-    m.op("*", 2, |_, a| check_int(int(&a[0], "*", 0)?.saturating_mul(int(&a[1], "*", 1)?), || format!("{} * {}", fmt(&a[0]), fmt(&a[1]))));
+    m.op("*", 2, |_, a| check_int(int(&a[0], "*", 0)?.saturating_mul(int(&a[1], "*", 1)?), || format!("{}*{}", fmt(&a[0]), fmt(&a[1]))));
     m.op("^", 2, |_, a| {
         let (b, e) = (int(&a[0], "^", 0)?, int(&a[1], "^", 1)?);
         if e < 0 {
             return fail(format!("The second argument of ^ should be a natural number, but instead it is:\n{}", e));
         }
         let r = b.checked_pow(e.min(u32::MAX as i64) as u32).unwrap_or(i64::MAX);
-        check_int(r, || format!("{} ^ {}", b, e))
+        check_int(r, || format!("{}^{}", b, e))
     });
     m.op("<", 2, |_, a| Ok(Value::Bool(int(&a[0], "<", 0)? < int(&a[1], "<", 1)?)));
     m.op(">", 2, |_, a| Ok(Value::Bool(int(&a[0], ">", 0)? > int(&a[1], ">", 1)?)));
@@ -295,9 +420,16 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     m.op("Cardinality", 1, |_, a| {
         let s = set(&a[0], "Cardinality", 0)?;
         if !s.enumerable() {
+            if empty_product(s) {
+                return Ok(Value::Int(0));
+            }
             return fail(format!("Attempted to compute the cardinality of the infinite set {}", fmt_set(s)));
         }
-        Ok(Value::Int(s.size()?))
+        let n = s.size()?;
+        if n > 2147483647 {
+            return fail(format!("Attempted to apply the operator overridden by the Java method\npublic static tlc2.value.impl.IntValue tlc2.module.FiniteSets.Cardinality(tlc2.value.impl.Value),\nbut it produced the following error:\nOverflow when computing the number of elements in:\n{}", fmt_set(s)));
+        }
+        Ok(Value::Int(n))
     });
     let finite_sets = m.done();
 
@@ -470,7 +602,20 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     m.op("TLCDefer", 1, |_, _| Ok(Value::Bool(true)));
     m.op("PickSuccessor", 1, |_, _| Ok(Value::Bool(true)));
     m.op("TLCNoOp", 1, |_, a| Ok(a[0].clone()));
-    m.op("TLCCache", 2, |_, a| Ok(a[0].clone()));
+    // TLCCache(expr, closure): expr is evaluated once per (occurrence, closure value)
+    m.op_lazy("TLCCache", 2, |ev, a| {
+        let node = match &a[0] {
+            Value::Thunk(t) => t.e as *const crate::ast::Node as usize,
+            _ => return ev.unthunk(&a[0]),
+        };
+        let key = (node, fmt(&ev.unthunk(&a[1])?));
+        if let Some(v) = ev.tlc_cache.borrow().get(&key) {
+            return Ok(v.clone());
+        }
+        let v = ev.unthunk(&a[0])?;
+        ev.tlc_cache.borrow_mut().insert(key, v.clone());
+        Ok(v)
+    });
     m.op("TLCGetOrDefault", 2, |ev, a| Ok(ev.registers.borrow().get(&reg_key(&a[0], "TLCGetOrDefault")?).cloned().unwrap_or_else(|| a[1].clone())));
     m.op_ops("TLCGetAndSet", 4, 0b10, |ev, a| {
         let key = reg_key(&a[0], "TLCGetAndSet")?;
@@ -506,7 +651,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         let mut out: Vec<(Value, i64)> = d0.iter().zip(v0.iter()).map(|(d, v)| (d.clone(), bag_n(v))).collect();
         for i in 0..d1.len() {
             match bsearch(&d0, &d1[i])? {
-                Some(k) => out[k].1 += bag_n(&v1[i]),
+                Some(k) => out[k].1 = bag_add(out[k].1, bag_n(&v1[i]))?,
                 None => out.push((d1[i].clone(), bag_n(&v1[i]))),
             }
         }
@@ -531,7 +676,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
             'next: for i in 0..d.len() {
                 for p in out.iter_mut() {
                     if val_eq(&p.0, &d[i])? {
-                        p.1 += bag_n(&v[i]);
+                        p.1 = bag_add(p.1, bag_n(&v[i]))?;
                         continue 'next;
                     }
                 }
@@ -584,7 +729,13 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         }
         mk_bag(out)
     });
-    m.op("BagCardinality", 1, |_, a| Ok(Value::Int(bag_pairs(&a[0], "BagCardinality")?.1.iter().map(bag_n).sum())));
+    m.op("BagCardinality", 1, |_, a| {
+        let mut x = 0;
+        for y in bag_pairs(&a[0], "BagCardinality")?.1 {
+            x = bag_add(x, bag_n(y))?;
+        }
+        Ok(Value::Int(x))
+    });
     m.op("CopiesIn", 2, |_, a| {
         let (d, v) = bag_pairs(&a[1], "CopiesIn")?;
         Ok(match bsearch(&d, &a[0])? {
@@ -596,36 +747,48 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
 
     let mut m = MB::new("Randomization", &[]);
     m.op("RandomSubset", 2, |ev, a| {
-        let k = int(&a[0], "RandomSubset", 0)?;
-        let mut s = set(&a[1], "RandomSubset", 1)?.elems()?.to_vec();
-        if k < 0 || k as usize > s.len() {
-            return fail(format!("The first argument of RandomSubset should be between 0 and the cardinality of the set, but it is {}", k));
+        let k = match &a[0] {
+            Value::Int(k) => *k,
+            v => return fail(format!("The first argument of RandomSubset should be a nonnegative integer, but instead it is:\n{}", fmt(v))),
+        };
+        let x = finite_set(&a[1], "RandomSubset", 1, "a finite set")?;
+        if k < 0 {
+            return fail(format!("Attempted to apply the operator overridden by the Java method\npublic static tlc2.value.impl.Value tlc2.module.Randomization.RandomSubset(tlc2.value.impl.Value,tlc2.value.impl.Value),\nbut it produced the following error:\n{}", k));
         }
-        for i in (1..s.len()).rev() {
-            let j = ((ev.random() * (i + 1) as f64) as usize).min(i);
-            s.swap(i, j);
-        }
-        s.truncate(k as usize);
-        mk_set(s)
+        random_subset(ev, k, x)
     });
     m.op("RandomSetOfSubsets", 3, |ev, a| {
-        let (k, n) = (int(&a[0], "RandomSetOfSubsets", 0)?, int(&a[1], "RandomSetOfSubsets", 1)?);
-        let s = set(&a[2], "RandomSetOfSubsets", 2)?.elems()?;
-        let mut out = vec![];
-        for _ in 0..k {
-            let p = if s.is_empty() { 0.0 } else { n as f64 / s.len() as f64 };
-            out.push(SetV::of(s.iter().filter(|_| ev.random() < p).cloned().collect()));
+        let k = match &a[0] {
+            Value::Int(k) if *k >= 0 => *k,
+            v => return fail(format!("The first argument of RandomSetOfSubsets should be a nonnegative integer, but instead it is:\n{}", fmt(v))),
+        };
+        let n1 = match &a[1] {
+            Value::Int(k) if *k >= 0 => *k,
+            v => return fail(format!("The second argument of RandomSetOfSubsets should be a nonnegative integer, but instead it is:\n{}", fmt(v))),
+        };
+        let x = finite_set(&a[2], "RandomSetOfSubsets", 2, "finite set")?;
+        let n = card_of(x)?;
+        too_many_picks(k, n, "RandomSetOfSubsets")?;
+        if n < n1 {
+            return fail(format!("The second argument of RandomSetOfSubsets should be a nonnegative integer in range 0..Cardinality(S), but instead it is:\n{}", fmt(&a[1])));
         }
-        mk_set(out)
+        random_set_of_subsets(ev, k, if n == 0 { 0.0 } else { n1 as f64 / n as f64 }, x)
     });
     m.op("RandomSubsetSet", 3, |ev, a| {
-        let k = int(&a[0], "RandomSubsetSet", 0)?;
-        let s = set(&a[2], "RandomSubsetSet", 2)?.elems()?;
-        let mut out = vec![];
-        for _ in 0..k {
-            out.push(SetV::of(s.iter().filter(|_| ev.random() < 0.5).cloned().collect()));
+        let k = match &a[0] {
+            Value::Int(k) if *k >= 0 => *k,
+            v => return fail(format!("The first argument of RandomSubsetSetProbability should be a nonnegative integer, but instead it is:\n{}", fmt(v))),
+        };
+        let p = match &a[1] {
+            Value::Str(s) => string(*s).trim().parse::<f64>().unwrap_or(f64::NAN),
+            v => return fail(format!("The second argument of RandomSubsetSetProbability should be a string literal representing a probability, but instead it is:\n{}", fmt(v))),
+        };
+        if p.is_nan() || !(0.0..=1.0).contains(&p) {
+            return fail(format!("The second argument of RandomSubsetSetProbability should be a string literal does not represent a parsable probability, but instead it is:\n{}", fmt(&a[1])));
         }
-        mk_set(out)
+        let x = finite_set(&a[2], "RandomSubsetSetProbability", 2, "finite set")?;
+        too_many_picks(k, card_of(x)?, "RandomSubsetSetProbability")?;
+        random_set_of_subsets(ev, k, p, x)
     });
     m.op("TestRandomSetOfSubsets", 3, |_, _| Ok(Value::Bool(true)));
     let randomization = m.done();
