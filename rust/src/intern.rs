@@ -1,0 +1,80 @@
+//! Two interners: `Name` for identifiers / operator names (arbitrary order), and `StrId` for TLA+
+//! strings and model values, whose ids reproduce TLC's "order of first interning" (see TLC_NOTES 1.1).
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct Name(pub u32);
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct StrId(pub u32);
+
+#[derive(Default)]
+struct Interner {
+    map: HashMap<Rc<str>, u32>,
+    items: Vec<Rc<str>>,
+}
+impl Interner {
+    fn get(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.map.get(s) {
+            return i;
+        }
+        let i = self.items.len() as u32;
+        let r: Rc<str> = Rc::from(s);
+        self.items.push(r.clone());
+        self.map.insert(r, i);
+        i
+    }
+}
+
+thread_local! {
+    static NAMES: RefCell<Interner> = RefCell::new(Interner::default());
+    static STRS: RefCell<Interner> = RefCell::new(Interner::default());
+}
+
+pub fn name(s: &str) -> Name {
+    NAMES.with(|n| Name(n.borrow_mut().get(s)))
+}
+pub fn name_str(n: Name) -> Rc<str> {
+    NAMES.with(|t| t.borrow().items[n.0 as usize].clone())
+}
+/// Interns a TLA+ string; the id is its position in first-seen order.
+pub fn str_id(s: &str) -> StrId {
+    STRS.with(|n| StrId(n.borrow_mut().get(s)))
+}
+pub fn str_of(id: StrId) -> Rc<str> {
+    STRS.with(|t| t.borrow().items[id.0 as usize].clone())
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&name_str(*self))
+    }
+}
+
+pub type Loc = [u32; 4];
+
+#[derive(Debug, Clone)]
+pub struct TlaError {
+    pub msg: String,
+    pub loc: Option<Loc>,
+    pub module: Option<String>,
+    pub kind: &'static str,
+}
+
+#[derive(Debug)]
+pub enum Fail {
+    /// Control flow: the first satisfying assignment was found (ENABLED, \cdot as a predicate).
+    Found,
+    Tla(TlaError),
+    /// The checker aborts with a final status (incomplete successor, illegal initial state).
+    Check { status: &'static str, message: String },
+}
+pub type R<T> = Result<T, Box<Fail>>;
+
+pub fn err<T>(kind: &'static str, msg: String) -> R<T> {
+    Err(Box::new(Fail::Tla(TlaError { msg, loc: None, module: None, kind })))
+}
+pub fn eval_err<T>(msg: String) -> R<T> {
+    err("eval", msg)
+}

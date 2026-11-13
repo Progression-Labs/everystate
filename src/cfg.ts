@@ -25,7 +25,7 @@ const SECTIONS = new Set(['CONSTANT', 'CONSTANTS', 'INIT', 'NEXT', 'SPECIFICATIO
   'VIEW', 'CHECK_DEADLOCK', 'ALIAS', 'POSTCONDITION', 'POSTCONDITIONS', '_POSSIBLE', '_PERIODIC', '_RL_REWARD', 'TYPE', 'TYPE_CONSTRAINT']);
 
 const OPCHARS = '+-*/^&|%$#?@<>:.~=';
-const OPCANON: Record<string, string> = { '\\circ': '\\o', '\\leq': '<=', '=<': '<=', '\\geq': '>=', '#': '/=', '\\neq': '/=', '\\union': '\\cup', '\\intersect': '\\cap', '\\mod': '%' };
+const OPCANON: Record<string, string> = { '\\circ': '\\o', '\\leq': '<=', '=<': '<=', '\\geq': '>=', '#': '/=', '\\neq': '/=', '\\union': '\\cup', '\\intersect': '\\cap' };
 interface CTok { t: 'id' | 'num' | 'str' | 'sym' | 'eof'; v: string; line: number }
 
 function tokenize(src: string): CTok[] {

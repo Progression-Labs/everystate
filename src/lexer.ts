@@ -53,7 +53,7 @@ const CANON: Record<string, string> = {
   '\\land': '/\\', '\\lor': '\\/', '\\lnot': '~', '\\neg': '~', '\\equiv': '<=>', '#': '/=', '\\neq': '/=',
   '=<': '<=', '\\leq': '<=', '\\geq': '>=', '\\union': '\\cup', '\\intersect': '\\cap', '\\times': '\\X',
   '\\circ': '\\o', '(+)': '\\oplus', '(-)': '\\ominus', '(.)': '\\odot', '(/)': '\\oslash', '(\\X)': '\\otimes',
-  '\\notin': '\\notin', '\\forall': '\\A', '\\exists': '\\E', '\\mod': '%',
+  '\\notin': '\\notin', '\\forall': '\\A', '\\exists': '\\E',
 };
 
 const UNICODE: Record<string, string> = {
