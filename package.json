@@ -1,14 +1,30 @@
 {
   "name": "everystate",
   "version": "0.2.0",
-  "description": "A TLA+ model checker with no Java dependency (TLC-compatible). Rust engine compiled to WebAssembly.",
+  "description": "A TLA+ model checker with no Java dependency (TLC-compatible). Prebuilt native binaries, with a WebAssembly build for use from JavaScript.",
   "type": "module",
   "license": "MIT",
   "main": "wasm/everystate.mjs",
   "types": "wasm/everystate.d.ts",
-  "exports": { ".": { "types": "./wasm/everystate.d.ts", "default": "./wasm/everystate.mjs" } },
-  "bin": { "everystate": "wasm/cli.mjs" },
-  "files": ["wasm/everystate.mjs", "wasm/everystate.d.ts", "wasm/everystate.wasm", "wasm/cli.mjs", "README.md", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./wasm/everystate.d.ts",
+      "default": "./wasm/everystate.mjs"
+    }
+  },
+  "bin": {
+    "everystate": "bin/everystate.mjs",
+    "everystate-java": "bin/everystate.mjs"
+  },
+  "files": [
+    "bin/everystate.mjs",
+    "wasm/everystate.mjs",
+    "wasm/everystate.d.ts",
+    "wasm/everystate.wasm",
+    "wasm/cli.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "cargo build --release && sh wasm/build.sh",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts && node test/community.mjs",
@@ -17,7 +33,26 @@
     "conformance:statechart": "node scripts/statechart-corpus.mjs",
     "bench": "node scripts/bench.mjs"
   },
-  "engines": { "node": ">=20" },
-  "keywords": ["tla", "tlaplus", "tlc", "model-checker", "formal-verification", "wasm"],
-  "repository": { "type": "git", "url": "git+https://github.com/mattzcarey/everystate.git" }
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "tla",
+    "tlaplus",
+    "tlc",
+    "model-checker",
+    "formal-verification",
+    "wasm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mattzcarey/everystate.git"
+  },
+  "optionalDependencies": {
+    "everystate-linux-x64": "0.2.0",
+    "everystate-linux-arm64": "0.2.0",
+    "everystate-darwin-x64": "0.2.0",
+    "everystate-darwin-arm64": "0.2.0",
+    "everystate-win32-x64": "0.2.0"
+  }
 }

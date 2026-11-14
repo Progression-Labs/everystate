@@ -1,0 +1,99 @@
+# Builds the native binaries and publishes the npm packages.
+# Run it by pushing a tag `vX.Y.Z` that matches the version in package.json, or from the Actions tab.
+# Needs a repository secret NPM_TOKEN (an npm automation or granular token allowed to publish).
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  npm: linux-x64,    exe: everystate }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, npm: linux-arm64,  exe: everystate }
+          - { os: macos-latest,     target: x86_64-apple-darwin,        npm: darwin-x64,   exe: everystate }
+          - { os: macos-latest,     target: aarch64-apple-darwin,       npm: darwin-arm64, exe: everystate }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     npm: win32-x64,    exe: everystate.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --bin everystate --target ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.npm != 'darwin-x64'
+        shell: bash
+        run: |
+          set +e
+          target/${{ matrix.target }}/release/${{ matrix.exe }} examples/Counter.tla
+          test $? -eq 12
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everystate-${{ matrix.npm }}
+          path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Build the WebAssembly module and run the tests
+        run: |
+          cargo build --release
+          sh wasm/build.sh
+          npm test
+      - name: Publish the platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          for dir in artifacts/everystate-*; do
+            name=$(basename "$dir")
+            pa=${name#everystate-}
+            exe=everystate
+            case "$pa" in win32-*) exe=everystate.exe ;; esac
+            if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name@$version already published"; continue; fi
+            node scripts/npm-platform.mjs "${pa%-*}" "${pa#*-}" "$dir/$exe" "pkg/$name"
+            (cd "pkg/$name" && npm publish --access public)
+          done
+      - name: Publish everystate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "everystate@$version" version >/dev/null 2>&1; then echo "everystate@$version already published"; exit 0; fi
+          npm publish --access public
+      - name: Attach the binaries to a GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          for dir in artifacts/everystate-*; do
+            name=$(basename "$dir")
+            (cd "$dir" && tar czf "../../dist/$name.tar.gz" *)
+          done
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

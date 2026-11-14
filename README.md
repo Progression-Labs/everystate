@@ -11,7 +11,8 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 ## Install
 
 ```sh
-cargo install everystate
+npm install -g everystate     # prebuilt binary for Linux, macOS and Windows
+cargo install everystate      # or build from source
 ```
 
 ## Example
@@ -75,6 +76,8 @@ everystate -json examples/Counter.tla
 
 ### From JavaScript (WebAssembly)
 
+The npm package also exports the engine compiled to WebAssembly:
+
 ```ts
 import { check } from 'everystate';
 
@@ -93,7 +96,7 @@ operators.
 
 ### In place of Java TLC
 
-`everystate java ...` accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
+`everystate java ...` (or `everystate-java ...` from npm) accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
 shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
 this way.
 
@@ -136,6 +139,9 @@ are parsed and skipped).
 npm run build      # native binary and wasm/everystate.wasm
 npm test           # WASM API, pretty-printer and community-module tests
 ```
+
+Releases: bump the version in `package.json` (and its `optionalDependencies`) and `Cargo.toml`,
+then push a tag `vX.Y.Z`; `.github/workflows/release.yml` builds the binaries and publishes to npm.
 
 An earlier pure-TypeScript engine is in the git history at commit `e8c67ce` (npm `everystate@0.1.0`).
 
