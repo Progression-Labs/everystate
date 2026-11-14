@@ -228,6 +228,21 @@ impl SetV {
                 Ok(true)
             }
             SetK::FcnSet(dom, rng) => {
+                // the common shape, a function whose domain is literally the set's (scalars in the same
+                // order), without building the domain as a set
+                let same_dom = match (v, &dom.k) {
+                    (Value::Fcn(f), SetK::Enum(e)) => f.dom.len() == e.len() && f.dom.iter().zip(e.iter()).all(|(x, y)| scalar_cmp(x, y) == Some(Ordering::Equal)),
+                    (Value::Tuple(t), SetK::Interval(1, hi)) => t.len() as i64 == *hi,
+                    _ => false,
+                };
+                if same_dom {
+                    for x in fcn_values(v)? {
+                        if !rng.contains(x)? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
                 let d = match domain_of(v) {
                     None => {
                         return match v {
@@ -577,7 +592,7 @@ fn eq_fail<X>(a: &Value, b: &Value) -> R<X> {
 
 fn model_cmp(m: StrId, o: &Value) -> R<Ordering> {
     if let Value::Model(x) = o {
-        if m != *x {
+        if m != *x && any_typed() {
             if let (Some(t1), Some(t2)) = (model_type(m), model_type(*x)) {
                 if t1 != t2 {
                     return eval_err(format!("Attempted to compare the differently-typed model values {} and {}", str_of(m), str_of(*x)));
@@ -586,7 +601,7 @@ fn model_cmp(m: StrId, o: &Value) -> R<Ordering> {
         }
         return Ok(m.0.cmp(&x.0));
     }
-    if model_type(m).is_some() {
+    if any_typed() && model_type(m).is_some() {
         return eval_err(format!("Attempted to compare the typed model value {} with the non-model value\n{}", str_of(m), fmt(o)));
     }
     Ok(Ordering::Less) // an untyped model value is smaller than every non-model value
@@ -638,7 +653,10 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
                 return Ok(x.len().cmp(&y.len()));
             }
             for i in 0..x.len() {
-                let c = compare(&x[i], &y[i])?;
+                let c = match scalar_cmp(&x[i], &y[i]) {
+                    Some(c) => c,
+                    None => compare(&x[i], &y[i])?,
+                };
                 if c != Ordering::Equal {
                     return Ok(c);
                 }
@@ -833,11 +851,27 @@ pub fn set_eq(a: &Rc<SetV>, b: &Rc<SetV>) -> R<bool> {
     Ok(true)
 }
 
+/// `compare` for two scalars of the same kind, without a call; None for everything else.
+#[inline(always)]
+pub fn scalar_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Str(x), Value::Str(y)) => Some(x.0.cmp(&y.0)),
+        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
+        (Value::Model(x), Value::Model(y)) if !any_typed() => Some(x.0.cmp(&y.0)),
+        _ => None,
+    }
+}
+
 pub fn bsearch(arr: &[Value], v: &Value) -> R<Option<usize>> {
     let (mut lo, mut hi) = (0isize, arr.len() as isize - 1);
     while lo <= hi {
         let mid = (lo + hi) >> 1;
-        match compare(&arr[mid as usize], v)? {
+        let c = match scalar_cmp(&arr[mid as usize], v) {
+            Some(c) => c,
+            None => compare(&arr[mid as usize], v)?,
+        };
+        match c {
             Ordering::Equal => return Ok(Some(mid as usize)),
             Ordering::Less => lo = mid + 1,
             Ordering::Greater => hi = mid - 1,

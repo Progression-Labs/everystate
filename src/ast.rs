@@ -76,6 +76,9 @@ pub struct DefNode {
     pub body: Node,
     pub local: bool,
     pub loc: Loc,
+    /// LET definitions: modules::let_closed (-1 not computed) and the value of a closed constant one
+    pub closed: Cell<i8>,
+    pub cval: std::cell::RefCell<Option<crate::value::Value>>,
 }
 
 pub struct InstSubst {

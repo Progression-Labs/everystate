@@ -76,6 +76,18 @@ impl MB {
         MB { info, name }
     }
     fn add(&mut self, n: &str, arity: usize, bi: Builtin) {
+        let mut bi = bi;
+        if arity == 2 && matches!(&*self.name.to_string(), "Naturals" | "Integers" | "Reals") {
+            bi.arith = match n {
+                "+" => 1,
+                "-" => 2,
+                "<" => 3,
+                ">" => 4,
+                "<=" => 5,
+                ">=" => 6,
+                _ => 0,
+            };
+        }
         let params: Vec<Param> = (0..arity).map(|i| Param { name: name(&format!("p{}", i)), arity: if bi.ops & (1 << i) != 0 { 1 } else { 0 } }).collect();
         let def = Def::new(name(n), params, None, self.name, false, [0; 4]);
         def.builtin.set(Some(leak(bi)));
@@ -85,16 +97,16 @@ impl MB {
         self.info.own_defs.push(def);
     }
     fn op(&mut self, n: &str, arity: usize, f: NativeFn) {
-        self.add(n, arity, Builtin { f: BFn::Native(f), ops: 0, lazy: false });
+        self.add(n, arity, Builtin { f: BFn::Native(f), ops: 0, lazy: false, arith: 0 });
     }
     fn op_ops(&mut self, n: &str, arity: usize, ops: u32, f: NativeFn) {
-        self.add(n, arity, Builtin { f: BFn::Native(f), ops, lazy: false });
+        self.add(n, arity, Builtin { f: BFn::Native(f), ops, lazy: false, arith: 0 });
     }
     fn op_lazy(&mut self, n: &str, arity: usize, f: NativeFn) {
-        self.add(n, arity, Builtin { f: BFn::Native(f), ops: 0, lazy: true });
+        self.add(n, arity, Builtin { f: BFn::Native(f), ops: 0, lazy: true, arith: 0 });
     }
     fn val(&mut self, n: &str, v: Value) {
-        self.add(n, 0, Builtin { f: BFn::Const(v), ops: 0, lazy: false });
+        self.add(n, 0, Builtin { f: BFn::Const(v), ops: 0, lazy: false, arith: 0 });
     }
     fn done(self) -> Rc<ModuleInfo> {
         Rc::new(self.info)
@@ -1630,7 +1642,7 @@ pub fn apply_overrides(loader: &Loader) {
     for (mname, op, ops, lazy, f) in overrides().into_iter().chain(crate::community::overrides()) {
         if let Some(m) = loader.modules.get(&name(mname)) {
             if let Some(Sym::Def(d)) = m.syms.get(name(op)) {
-                d.builtin.set(Some(leak(Builtin { f: BFn::Native(f), ops, lazy })));
+                d.builtin.set(Some(leak(Builtin { f: BFn::Native(f), ops, lazy, arith: 0 })));
             }
         }
     }
