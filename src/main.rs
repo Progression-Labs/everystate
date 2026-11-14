@@ -9,7 +9,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() {
     let mut argv: Vec<String> = std::env::args().collect();
     let exe = argv.remove(0);
-    let exe_name = exe.rsplit('/').next().unwrap_or("").to_string();
+    let exe_name = exe.rsplit(|c| c == '/' || c == '\\').next().unwrap_or("").to_string();
     let java = exe_name.starts_with("everystate-java") || exe_name == "java" || argv.first().map(|a| a == "java").unwrap_or(false) && { argv.remove(0); true };
     if argv.first().map(|a| a == "--ppr").unwrap_or(false) {
         // test hook: pretty-print the value on stdin at the given width (default 80), as TLC's Values.ppr does

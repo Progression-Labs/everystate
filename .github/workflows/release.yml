@@ -21,7 +21,7 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, npm: linux-arm64,  exe: everystate }
           - { os: macos-latest,     target: x86_64-apple-darwin,        npm: darwin-x64,   exe: everystate }
           - { os: macos-latest,     target: aarch64-apple-darwin,       npm: darwin-arm64, exe: everystate }
-          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     npm: win32-x64,    exe: everystate.exe }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     npm: win32-x64,    exe: everystate.exe }  # also covers Windows paths and CRLF checkouts
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

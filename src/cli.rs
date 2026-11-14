@@ -17,16 +17,31 @@ use std::rc::Rc;
 pub const VERSION: &str = "0.1.0";
 
 // ---- path helpers (pure string operations: no file-system access) ----
+/// On Windows, backslashes are separators too; everything is handled with forward slashes, which
+/// Windows file APIs accept.
+fn norm(p: &str) -> String {
+    if cfg!(windows) { p.replace('\\', "/") } else { p.to_string() }
+}
+/// A Windows drive prefix such as `C:` at the start of a path.
+fn drive(p: &str) -> Option<&str> {
+    let b = p.as_bytes();
+    if cfg!(windows) && b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() { Some(&p[..2]) } else { None }
+}
 pub fn path_join(a: &str, b: &str) -> String {
-    if b.starts_with('/') || a.is_empty() {
-        return b.to_string();
+    let (a, b) = (norm(a), norm(b));
+    if b.starts_with('/') || drive(&b).is_some() || a.is_empty() {
+        return b;
     }
     if a.ends_with('/') { format!("{}{}", a, b) } else { format!("{}/{}", a, b) }
 }
 pub fn path_resolve(cwd: &str, p: &str) -> String {
     let full = path_join(cwd, p);
+    let (prefix, rest) = match drive(&full) {
+        Some(d) => (d.to_string(), &full[2..]),
+        None => (String::new(), &full[..]),
+    };
     let mut parts: Vec<&str> = vec![];
-    for seg in full.split('/') {
+    for seg in rest.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
@@ -35,17 +50,20 @@ pub fn path_resolve(cwd: &str, p: &str) -> String {
             s => parts.push(s),
         }
     }
-    format!("/{}", parts.join("/"))
+    format!("{}/{}", prefix, parts.join("/"))
+}
+fn last_sep(p: &str) -> Option<usize> {
+    if cfg!(windows) { p.rfind(|c| c == '/' || c == '\\') } else { p.rfind('/') }
 }
 pub fn dirname(p: &str) -> String {
-    match p.rfind('/') {
+    match last_sep(p) {
         Some(0) => "/".to_string(),
         Some(i) => p[..i].to_string(),
         None => ".".to_string(),
     }
 }
 pub fn basename<'a>(p: &'a str, ext: &str) -> &'a str {
-    let b = match p.rfind('/') {
+    let b = match last_sep(p) {
         Some(i) => &p[i + 1..],
         None => p,
     };
