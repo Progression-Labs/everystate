@@ -14,7 +14,7 @@ use crate::value::fmt;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---- path helpers (pure string operations: no file-system access) ----
 /// On Windows, backslashes are separators too; everything is handled with forward slashes, which
@@ -313,7 +313,7 @@ impl Events for CliEvents<'_> {
     }
 }
 
-const USAGE: &str = "everystate 0.1.0 - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n";
+const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
 
 struct Dump {
     file: String,
