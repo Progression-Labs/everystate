@@ -454,7 +454,7 @@ impl Parser {
             let loc = body.loc;
             body = Node::new(loc, E::FnDef { bounds: b, body: Box::new(body), recname: Some(name(&nm)), is_rec: Cell::new(false) });
         }
-        Ok(LetDef::Def(DefNode { name: name(&nm), params, body, local: false, loc: [t.line, t.col, self.last.line, self.last.ec] }))
+        Ok(LetDef::Def(DefNode { name: name(&nm), params, body, local: false, loc: [t.line, t.col, self.last.line, self.last.ec], closed: Cell::new(-1), cval: Default::default() }))
     }
 
     // ---------- proofs (parsed and discarded) ----------

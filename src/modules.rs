@@ -29,6 +29,8 @@ pub struct Builtin {
     pub f: BFn,
     pub ops: u32,   // bit i set: argument i is operator-valued
     pub lazy: bool, // receives unevaluated thunks
+    /// integer operators the evaluator computes inline: 1 +, 2 -, 3 <, 4 >, 5 <=, 6 >= (0: none)
+    pub arith: u8,
 }
 
 pub struct Inst {
@@ -970,6 +972,104 @@ pub fn for_children(n: N, f: &mut dyn FnMut(N)) {
         E::Dot { e, .. } => f(e),
         E::Lambda { body, .. } | E::TQuant { body, .. } => f(body),
     }
+}
+
+/// Is the parameterless LET definition `d` a closed constant: no state, no free local identifier (parameter,
+/// bound variable, outer LET definition) and only operators without side effects? Its value is then the same
+/// wherever the LET is evaluated, and the evaluator computes it once.
+pub fn let_closed(d: &'static DefNode) -> bool {
+    let c = d.closed.get();
+    if c >= 0 {
+        return c == 1;
+    }
+    fn names(b: &'static Bound, bound: &mut Vec<Name>) {
+        if let Some(ns) = &b.names {
+            bound.extend(ns.iter().copied());
+        }
+        if let Some(ns) = &b.tuple {
+            bound.extend(ns.iter().copied());
+        }
+    }
+    // true: `n` is fine
+    fn ok(n: N, bound: &mut Vec<Name>) -> bool {
+        let mark = bound.len();
+        let r = match &n.e {
+            E::At | E::StepRef | E::AssumeProve | E::TQuant { .. } => false,
+            E::App { name, args, sel, r, .. } => {
+                sel.is_none()
+                    && match r.get() {
+                        Res::Local => bound.contains(name),
+                        Res::Decl(dc) => !dc.is_var && dc.subst.get().is_none() && dc.arity == 0,
+                        Res::Def(x) => {
+                            let x = x.resolved();
+                            if x.inst.is_some() {
+                                false
+                            } else if x.builtin.get().is_some() {
+                                // standard modules whose operators are pure functions of their arguments
+                                matches!(&*x.module.to_string(), "Naturals" | "Integers" | "Reals" | "Sequences" | "FiniteSets" | "Bags")
+                            } else {
+                                // a user constant: evaluated once anyway
+                                x.params.is_empty() && def_level(x) == 0
+                            }
+                        }
+                        Res::None => false,
+                    }
+                    && args.iter().all(|a| ok(a, bound))
+            }
+            E::Quant { bounds, body, .. } | E::FnDef { bounds, body, .. } => {
+                let sets = bounds.iter().all(|b| b.set.as_ref().map_or(false, |s| ok(s, bound)));
+                if let E::FnDef { recname: Some(rn), .. } = &n.e {
+                    bound.push(*rn);
+                }
+                for b in bounds {
+                    names(b, bound);
+                }
+                sets && ok(body, bound)
+            }
+            E::SetMap { e, bounds } => {
+                let sets = bounds.iter().all(|b| b.set.as_ref().map_or(false, |s| ok(s, bound)));
+                for b in bounds {
+                    names(b, bound);
+                }
+                sets && ok(e, bound)
+            }
+            E::Choose { bound: b, body } | E::SetFilter { bound: b, pred: body } => {
+                let set = b.set.as_ref().map_or(false, |s| ok(s, bound));
+                names(b, bound);
+                set && ok(body, bound)
+            }
+            E::Lambda { params, body } => {
+                bound.extend(params.iter().map(|p| p.name));
+                ok(body, bound)
+            }
+            E::Let { defs, body } => {
+                let mut all = true;
+                for d in defs {
+                    match d {
+                        LetDef::Inst(_) => all = false,
+                        LetDef::Def(d) => {
+                            bound.push(d.name); // recursive LET operators refer to themselves
+                            let m2 = bound.len();
+                            bound.extend(d.params.iter().map(|p| p.name));
+                            all = all && ok(&d.body, bound);
+                            bound.truncate(m2);
+                        }
+                    }
+                }
+                all && ok(body, bound)
+            }
+            _ => {
+                let mut all = true;
+                for_children(n, &mut |c| all = all && ok(c, bound));
+                all
+            }
+        };
+        bound.truncate(mark);
+        r
+    }
+    let r = d.params.is_empty() && level_of(&d.body) == 0 && ok(&d.body, &mut Vec::new());
+    d.closed.set(r as i8);
+    r
 }
 
 /// Can evaluating `n` yield a function constructor directly (through IF/CASE/LET/definitions)? TLC keeps such a

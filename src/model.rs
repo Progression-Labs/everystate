@@ -367,7 +367,7 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config, host:
                 None => {
                     let params = (0..args.len()).map(|i| Param { name: name(&format!("p{}", i)), arity: 0 }).collect();
                     let def = Def::new(d.name, params, None, d.module, false, [0; 4]);
-                    let bi: &'static Builtin = leak(Builtin { f: BFn::Table(RefCell::new(vec![]), d.name), ops: 0, lazy: false });
+                    let bi: &'static Builtin = leak(Builtin { f: BFn::Table(RefCell::new(vec![]), d.name), ops: 0, lazy: false, arith: 0 });
                     def.builtin.set(Some(bi));
                     d.subst.set(Some(leak(def)));
                     match &bi.f {
@@ -399,7 +399,7 @@ pub fn build_model(root_name: &str, resolve: SourceResolver, cfg: &Config, host:
                 }
                 Sym::Def(d) => {
                     let o = Def::new(d.name, vec![], None, d.module, false, d.loc);
-                    o.builtin.set(Some(leak(Builtin { f: BFn::Const(c.value.clone().unwrap()), ops: 0, lazy: false })));
+                    o.builtin.set(Some(leak(Builtin { f: BFn::Const(c.value.clone().unwrap()), ops: 0, lazy: false, arith: 0 })));
                     d.over.set(Some(leak(o)));
                 }
                 _ => {}

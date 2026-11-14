@@ -77,7 +77,7 @@ pub type C = Option<Rc<Ctx>>;
 pub enum Bind {
     Val(Value),
     /// zero-argument LET definition: evaluated in the context of its LET group
-    LetLazy { body: N, v: RefCell<Value>, st: Cell<u64> },
+    LetLazy { body: N, v: RefCell<Value>, st: Cell<u64>, d: &'static DefNode },
     LetOp(&'static DefNode),
     LetInst(&'static Def),
 }
@@ -141,6 +141,8 @@ pub struct LazyFcn {
     forced: RefCell<Option<Value>>,
     /// [f EXCEPT ![k] = v] on a function that is not enumerated: later entries win
     over: Vec<(Value, Value)>,
+    /// the evaluated domain sets, one per bound (TLC evaluates them when it creates the function value)
+    doms: RefCell<Option<Rc<Vec<Rc<SetV>>>>>,
 }
 
 struct FnParts {
@@ -171,10 +173,27 @@ impl LazyFcn {
         let sc = self.self_ctx();
         let mut c = sc.clone();
         let not_in = || -> R<C> { eval_err(format!("Attempted to apply function to argument {}, which is not in the domain of the function.", fmt(arg))) };
+        let cached = self.doms.borrow().clone();
+        let doms = match cached {
+            Some(d) => d,
+            None => {
+                let mut d = Vec::with_capacity(bounds.len());
+                for b in bounds {
+                    d.push(ev.eval_set(b.set.as_ref().unwrap(), &sc)?);
+                }
+                let d = Rc::new(d);
+                // a lazy set keeps the context it was built in, which for a recursive function holds the
+                // function itself: do not close that cycle
+                if p.recname.is_none() || !d.iter().any(|x| captures_ctx(&Value::Set(x.clone()))) {
+                    *self.doms.borrow_mut() = Some(d.clone());
+                }
+                d
+            }
+        };
         let one = bounds.len() == 1 && (bounds[0].tuple.is_some() || bounds[0].names.as_ref().unwrap().len() == 1);
         if one {
             let b = &bounds[0];
-            let s = ev.eval_set(b.set.as_ref().unwrap(), &sc)?;
+            let s = &doms[0];
             if !s.contains(arg)? {
                 return eval_err(format!("In applying the function\n{},\nthe first argument is:\n{}\nwhich is not in its domain.\n", self.show(ev), crate::pprint::ppr(&fmt(arg))));
             }
@@ -188,8 +207,8 @@ impl LazyFcn {
                 _ => return not_in(),
             };
             let mut i = 0;
-            for b in bounds {
-                let s = ev.eval_set(b.set.as_ref().unwrap(), &sc)?;
+            for (bi, b) in bounds.iter().enumerate() {
+                let s = &doms[bi];
                 let cnt = if b.tuple.is_some() { 1 } else { b.names.as_ref().unwrap().len() };
                 for j in 0..cnt {
                     let a = match t.get(i) {
@@ -213,7 +232,7 @@ impl LazyFcn {
         Ok(c)
     }
     pub fn new(node: N, ctx: C) -> Rc<LazyFcn> {
-        Rc::new(LazyFcn { node, ctx, memo: Rc::new(RefCell::new(HashMap::new())), forced: RefCell::new(None), over: Vec::new() })
+        Rc::new(LazyFcn { node, ctx, memo: Rc::new(RefCell::new(HashMap::new())), forced: RefCell::new(None), over: Vec::new(), doms: RefCell::new(None) })
     }
     fn is_rec(&self) -> bool {
         matches!(&self.node.e, E::FnDef { is_rec, .. } if is_rec.get())
@@ -229,7 +248,7 @@ impl LazyFcn {
     pub fn with_override(self: &Rc<Self>, key: Value, val: Value) -> Rc<LazyFcn> {
         let mut over = self.over.clone();
         over.push((key, val));
-        Rc::new(LazyFcn { node: self.node, ctx: self.ctx.clone(), memo: self.memo.clone(), forced: RefCell::new(None), over })
+        Rc::new(LazyFcn { node: self.node, ctx: self.ctx.clone(), memo: self.memo.clone(), forced: RefCell::new(None), over, doms: RefCell::new(self.doms.borrow().clone()) })
     }
     /// `lazy`: the caller keeps a function-valued result unevaluated (it is applied right away)
     pub fn apply(self: &Rc<Self>, ev: &Evaluator, arg: &Value, lazy: bool) -> R<Value> {
@@ -238,8 +257,14 @@ impl LazyFcn {
                 return Ok(v.clone());
             }
         }
-        let mut h = Hasher::new();
-        let key = if h.value(arg).is_ok() { Some(h.finish()) } else { None };
+        // The memo is what makes recursive function definitions (fib[n]) linear; a function that is not
+        // recursive is evaluated at each application, as in TLC.
+        let key = if self.is_rec() {
+            let mut h = Hasher::new();
+            if h.value(arg).is_ok() { Some(h.finish()) } else { None }
+        } else {
+            None
+        };
         if let Some(k) = key {
             if let Some(bucket) = self.memo.borrow().get(&k) {
                 for (a, v) in bucket {
@@ -564,8 +589,24 @@ impl Evaluator {
     }
     fn force_let(&self, node: &Rc<Ctx>, head: Rc<Ctx>, lazy: bool) -> R<Value> {
         match &node.val {
-            Bind::LetLazy { body, v, st } => {
+            Bind::LetLazy { body, v, st, d } => {
                 let val = self.force_cell(body, &Some(head), v, st, lazy)?;
+                // A closed constant (no state, no free local, no side effect) has one value: keep it on the
+                // definition, so that later evaluations of the LET bind it directly.
+                if st.get() == ANY && node.base.is_none() && !node.env && d.cval.borrow().is_none() && crate::modules::let_closed(d) {
+                    if !captures_ctx(&val) {
+                        *d.cval.borrow_mut() = Some(val.clone());
+                    } else if let Value::Set(fs) = &val {
+                        // a small filtered set: keep its elements rather than the lazy filter (which holds the context)
+                        if let SetK::Filter(f) = &fs.k {
+                            if f.s.enumerable() && matches!(f.s.size(), Ok(n) if n <= 1024) {
+                                if let Ok(e) = fs.elems() {
+                                    *d.cval.borrow_mut() = Some(SetV::of(e.to_vec()));
+                                }
+                            }
+                        }
+                    }
+                }
                 // A value that captures its context (lazy set, closure, lazy function) must not be cached in a
                 // cell of that very context: the reference cycle would never be freed.
                 if captures_ctx(&val) && st.get() != 0 {
@@ -863,6 +904,29 @@ impl Evaluator {
         let def = def.resolved();
         if let Some(bi) = def.builtin.get() {
             let na = args.len();
+            if bi.arith != 0 && na == 2 {
+                // integer arithmetic and comparison without the argument buffer and the indirect call
+                let x = self.eval(&args[0], ctx)?;
+                let y = self.eval(&args[1], ctx)?;
+                if let (Value::Int(a), Value::Int(b)) = (&x, &y) {
+                    let (a, b) = (*a, *b);
+                    match bi.arith {
+                        1 | 2 => {
+                            let r = if bi.arith == 1 { a.checked_add(b) } else { a.checked_sub(b) };
+                            if let Some(r) = r {
+                                if (-2147483648..=2147483647).contains(&r) {
+                                    return Ok(Value::Int(r));
+                                }
+                            }
+                        }
+                        3 => return Ok(Value::Bool(a < b)),
+                        4 => return Ok(Value::Bool(a > b)),
+                        5 => return Ok(Value::Bool(a <= b)),
+                        _ => return Ok(Value::Bool(a >= b)),
+                    }
+                }
+                return self.call_builtin(bi, &[x, y]);
+            }
             let mut buf: [Value; 3] = [Value::Undef, Value::Undef, Value::Undef];
             let mut big: Vec<Value>;
             let slots: &mut [Value] = if na <= 3 {
@@ -1181,7 +1245,16 @@ impl Evaluator {
                     }
                 }
                 LetDef::Def(d) => {
-                    let b = if d.params.is_empty() { Bind::LetLazy { body: &d.body, v: RefCell::new(Value::Undef), st: Cell::new(0) } } else { Bind::LetOp(d) };
+                    let b = if d.params.is_empty() {
+                        // a closed constant definition that has been evaluated before
+                        let known = if d.closed.get() == 1 && base.is_none() { d.cval.borrow().clone() } else { None };
+                        match known {
+                            Some(v) => Bind::Val(v),
+                            None => Bind::LetLazy { body: &d.body, v: RefCell::new(Value::Undef), st: Cell::new(0), d },
+                        }
+                    } else {
+                        Bind::LetOp(d)
+                    };
                     push(d.name, b, &mut c);
                 }
             }
@@ -1220,7 +1293,50 @@ impl Evaluator {
     #[inline(always)]
     fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
-            E::App { .. } => self.eval_app_forced(n, ctx),
+            E::App { r, name, .. } => {
+                // The most frequent leaves, without the general application path: a state variable or a
+                // constant outside any instance context, and a local identifier bound to a plain value.
+                match r.get() {
+                    Res::Decl(d) => {
+                        if ctx.as_ref().map_or(true, |c| !c.env && c.base.is_none()) {
+                            if d.is_var {
+                                let idx = d.idx.get();
+                                if idx >= 0 {
+                                    let v = self.cur.borrow().get(idx as usize);
+                                    if !matches!(v, Value::Undef) {
+                                        if self.prime_depth.get() > 0 {
+                                            self.pr_touch.set(self.pr_touch.get() + 1);
+                                        } else {
+                                            self.st_touch.set(self.st_touch.get() + 1);
+                                        }
+                                        return Ok(v);
+                                    }
+                                }
+                            } else if d.subst.get().is_none() {
+                                if let Some(v) = d.value.borrow().as_ref() {
+                                    return Ok(v.clone());
+                                }
+                            }
+                        }
+                    }
+                    Res::Local => {
+                        let mut c = ctx.as_ref();
+                        while let Some(node) = c {
+                            if node.name == *name {
+                                if let Bind::Val(v) = &node.val {
+                                    if matches!(v, Value::Int(_) | Value::Bool(_) | Value::Str(_) | Value::Model(_) | Value::Tuple(_) | Value::Record(_) | Value::Fcn(_) | Value::Set(_)) {
+                                        return Ok(v.clone());
+                                    }
+                                }
+                                break;
+                            }
+                            c = node.next.as_ref();
+                        }
+                    }
+                    _ => {}
+                }
+                self.eval_app_forced(n, ctx)
+            }
             E::Op(k, a) => self.eval_op_fast(n, *k, a, ctx),
             E::Num(v) => Ok(Value::Int(*v)),
             E::Bool(b) => Ok(Value::Bool(*b)),
@@ -1257,8 +1373,28 @@ impl Evaluator {
                 Ok(Value::Bool(false))
             }
             K::Not => Ok(Value::Bool(!self.eval_bool(&a[0], ctx)?)),
-            K::Eq => Ok(Value::Bool(val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
-            K::Ne => Ok(Value::Bool(!val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
+            K::Eq | K::Ne => {
+                // S = {} on an enumerated set: no empty set is built
+                if let E::Op(K::SetEnum, e) = &a[1].e {
+                    if e.is_empty() {
+                        let x = self.eval(&a[0], ctx)?;
+                        let eq = match &x {
+                            Value::Set(s) if matches!(s.k, SetK::Enum(_)) => match &s.k {
+                                SetK::Enum(el) => el.is_empty(),
+                                _ => unreachable!(),
+                            },
+                            _ => val_eq(&x, &Value::Set(empty_set()))?,
+                        };
+                        return Ok(Value::Bool(eq == (k == K::Eq)));
+                    }
+                }
+                let (x, y) = (self.eval(&a[0], ctx)?, self.eval(&a[1], ctx)?);
+                let eq = match scalar_cmp(&x, &y) {
+                    Some(c) => c == std::cmp::Ordering::Equal,
+                    None => val_eq(&x, &y)?,
+                };
+                Ok(Value::Bool(eq == (k == K::Eq)))
+            }
             K::If => {
                 if self.eval_bool(&a[0], ctx)? {
                     self.eval(&a[1], ctx)
@@ -1311,6 +1447,12 @@ impl Evaluator {
                 };
                 let s = self.eval_set(set, ctx)?;
                 let es = self.elems_at(&s, set)?;
+                // CHOOSE x \in S : TRUE, the usual way to pick an element: no binding needed
+                if matches!(body.e, E::Bool(true)) && bound.tuple.is_none() {
+                    if let Some(x) = es.first() {
+                        return Ok(x.clone());
+                    }
+                }
                 for x in es {
                     let c = match &bound.tuple {
                         Some(t) => self.bind_tuple(t, x, ctx)?,
@@ -1615,9 +1757,36 @@ impl Evaluator {
     /// The function operand of f[x] / DOMAIN f: kept lazy when it can be a function constructor.
     #[inline]
     fn eval_fn_operand(&self, f: N, ctx: &C) -> R<Value> {
-        if crate::modules::tail_fn(f) {
+        let tf = f.tf.get();
+        if if tf >= 0 { tf == 1 } else { crate::modules::tail_fn(f) } {
             self.eval_lazy(f, ctx)
-        } else if matches!(f.e, E::App { .. }) {
+        } else if let E::App { name, args, sel, r, .. } = &f.e {
+            // An operator parameter or bound identifier: TLC forces its lazy value in keep-lazy mode too, so
+            // `Op(f, x) == f[x]` applied to a function definition computes one point, not the whole function.
+            if let Res::Decl(d) = r.get() {
+                // a state variable (pc[self], grid[p]): read it directly
+                if d.is_var && ctx.as_ref().map_or(true, |c| !c.env && c.base.is_none()) {
+                    let idx = d.idx.get();
+                    if idx >= 0 {
+                        let v = self.cur.borrow().get(idx as usize);
+                        if !matches!(v, Value::Undef) {
+                            if self.prime_depth.get() > 0 {
+                                self.pr_touch.set(self.pr_touch.get() + 1);
+                            } else {
+                                self.st_touch.set(self.st_touch.get() + 1);
+                            }
+                            return Ok(v);
+                        }
+                    }
+                }
+            }
+            if args.is_empty() && sel.is_none() && matches!(r.get(), Res::Local) {
+                match self.lookup(ctx, *name)? {
+                    Looked::Val(Value::Thunk(lz)) => return self.force_lazy(&lz),
+                    Looked::Val(v) if matches!(v, Value::Tuple(_) | Value::Record(_) | Value::Fcn(_) | Value::LazyFcn(_)) => return Ok(v),
+                    _ => {}
+                }
+            }
             self.eval_app(f, ctx)
         } else {
             self.eval(f, ctx)

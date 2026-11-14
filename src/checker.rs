@@ -5,7 +5,6 @@ use crate::intern::*;
 use crate::model::*;
 use crate::value::*;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -113,8 +112,9 @@ impl FpSet {
 }
 
 /// Applies a model-value permutation; None when the value is unchanged.
-pub fn permute(v: &Value, m: &HashMap<StrId, StrId>) -> R<Option<Value>> {
-    fn all(vs: &[Value], m: &HashMap<StrId, StrId>) -> R<Option<Vec<Value>>> {
+/// `m` is a dense table indexed by string id (identity where the entry equals the index or is missing).
+pub fn permute(v: &Value, m: &[u32]) -> R<Option<Value>> {
+    fn all(vs: &[Value], m: &[u32]) -> R<Option<Vec<Value>>> {
         let mut out: Option<Vec<Value>> = None;
         for (i, x) in vs.iter().enumerate() {
             if let Some(y) = permute(x, m)? {
@@ -125,7 +125,10 @@ pub fn permute(v: &Value, m: &HashMap<StrId, StrId>) -> R<Option<Value>> {
         Ok(out)
     }
     Ok(match v {
-        Value::Model(x) => m.get(x).map(|y| Value::Model(*y)),
+        Value::Model(x) => match m.get(x.0 as usize) {
+            Some(y) if *y != x.0 => Some(Value::Model(StrId(*y))),
+            _ => None,
+        },
         Value::Tuple(t) => all(t, m)?.map(|e| Value::Tuple(TupleV::rc(e))),
         Value::Record(r) => all(&r.vals, m)?.map(|vals| Value::Record(Rc::new(RecordV::new(r.names.clone(), vals)))),
         Value::Fcn(f) => {
@@ -172,6 +175,10 @@ pub struct Checker<'a> {
     pub head: usize,
     pub depth: u32,
     nvars: usize,
+    /// the symmetry permutations as dense tables indexed by string id
+    perms: Vec<Vec<u32>>,
+    /// memo of `permute` for compound values: (value hash, permutation index) -> (value, its image)
+    perm_memo: std::cell::RefCell<std::collections::HashMap<(u64, u32), (Value, Option<Value>)>>,
     outdeg: Vec<u32>,
     cur_level: u32,
     empty: StateRef,
@@ -237,6 +244,19 @@ impl<'a> Checker<'a> {
             head: 0,
             depth: 0,
             nvars: model.vars.len(),
+            perm_memo: Default::default(),
+            perms: model.symmetry.as_ref().map_or(vec![], |sym| {
+                sym.iter()
+                    .map(|p| {
+                        let n = p.keys().map(|k| k.0 as usize + 1).max().unwrap_or(0);
+                        let mut t: Vec<u32> = (0..n as u32).collect();
+                        for (a, b) in p {
+                            t[a.0 as usize] = b.0;
+                        }
+                        t
+                    })
+                    .collect()
+            }),
             outdeg: vec![],
             cur_level: 0,
             empty: StateData::blank(0),
@@ -256,30 +276,81 @@ impl<'a> Checker<'a> {
         self.ev.stats.level.set(l as i64);
     }
 
+    /// `permute` with a memo: the same variable values (a set of messages, say) recur in many states, and
+    /// permuting and re-sorting them once per permutation is what symmetry reduction costs.
+    fn permute_memo(&self, v: &Value, p: &[u32], pi: u32) -> R<Option<Value>> {
+        if !matches!(v, Value::Tuple(_) | Value::Record(_) | Value::Fcn(_) | Value::Set(_)) {
+            return permute(v, p);
+        }
+        let mut h = Hasher::new();
+        h.value(v)?;
+        let key = (h.finish(), pi);
+        if let Some((orig, img)) = self.perm_memo.borrow().get(&key) {
+            // the hash only finds the entry; equality decides
+            if matches!(val_eq(orig, v), Ok(true)) {
+                return Ok(img.clone());
+            }
+        }
+        let img = permute(v, p)?;
+        let mut memo = self.perm_memo.borrow_mut();
+        // bounded: the images are extra copies of state values
+        if memo.len() >= 1 << 17 {
+            memo.clear();
+        }
+        memo.insert(key, (v.clone(), img.clone()));
+        Ok(img)
+    }
+
     /// The values that identify a state: the VIEW value, or all variables, of the symmetry-canonical state.
     pub fn fingerprint_input(&self, s: &StateRef) -> R<Vec<Value>> {
         let m = self.model;
         let mut canon: Option<Vec<Value>> = None;
-        if let Some(sym) = &m.symmetry {
+        if m.symmetry.is_some() {
             let base = s.snapshot(self.nvars);
-            for p in sym {
+            // Variables are compared cheapest first (by shallow size, which no permutation changes, so the
+            // order is the same for every state of an orbit): most permutations are decided on a small
+            // function and the big sets are never permuted. With a VIEW the declared order is kept.
+            let mut order: Vec<usize> = (0..base.len()).collect();
+            if m.view.is_none() {
+                let weight = |v: &Value| -> usize {
+                    match v {
+                        Value::Tuple(t) => t.len(),
+                        Value::Record(r) => r.vals.len(),
+                        Value::Fcn(f) => f.dom.len(),
+                        Value::Set(s) => match &s.k {
+                            SetK::Enum(e) => e.len(),
+                            _ => usize::MAX,
+                        },
+                        _ => 0,
+                    }
+                };
+                order.sort_by_key(|&i| weight(&base[i]));
+            }
+            let mut u: Vec<Value> = Vec::new();
+            for (pi, p) in self.perms.iter().enumerate() {
                 // Lexicographic comparison with the best candidate so far, variable by variable: most
-                // permutations lose on the first variable and the rest of the state is never permuted.
-                let mut u: Vec<Value> = Vec::new();
+                // permutations lose early and the rest of the state is never permuted.
+                u.clear();
+                u.extend(base.iter().cloned());
                 let mut wins = false;
-                for (i, v) in base.iter().enumerate() {
-                    let x = permute(v, p)?.unwrap_or_else(|| v.clone());
+                let mut lost = false;
+                for &i in &order {
+                    if let Some(x) = self.permute_memo(&base[i], p, pi as u32)? {
+                        u[i] = x;
+                    }
                     if !wins {
-                        match compare(&x, &canon.as_ref().unwrap_or(&base)[i])? {
-                            Ordering::Greater => break,
+                        match compare(&u[i], &canon.as_ref().unwrap_or(&base)[i])? {
+                            Ordering::Greater => {
+                                lost = true;
+                                break;
+                            }
                             Ordering::Less => wins = true,
                             Ordering::Equal => {}
                         }
                     }
-                    u.push(x);
                 }
-                if wins {
-                    canon = Some(u);
+                if wins && !lost {
+                    canon = Some(std::mem::take(&mut u));
                 }
             }
         }
