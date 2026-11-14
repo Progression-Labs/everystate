@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --release
+      - run: sh wasm/build.sh
+      - run: npm test
+      - name: Example spec reports the invariant violation
+        run: |
+          set +e
+          ./target/release/everystate examples/Counter.tla
+          test $? -eq 12
