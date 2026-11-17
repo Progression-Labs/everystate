@@ -90,18 +90,41 @@ pub extern "C" fn es_result_len() -> usize {
     RESULT.with(|r| r.borrow().len())
 }
 
+fn setup(root: &str, cfg_text: &str) -> R<crate::model::Model> {
+    let cfg = crate::cfg::parse_config(cfg_text)?;
+    let resolve: crate::modules::SourceResolver = Box::new(|name: &str| {
+        MODULES.with(|m| m.borrow().get(name).cloned()).or_else(|| crate::bundled::BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, s)| s.to_string()))
+    });
+    crate::model::build_model(root, resolve, &cfg, Rc::new(WasmHost))
+}
+
 fn run(root: &str, cfg_text: &str, deadlock: bool) -> String {
-    let setup: R<crate::model::Model> = (|| {
-        let cfg = crate::cfg::parse_config(cfg_text)?;
-        let resolve: crate::modules::SourceResolver = Box::new(|name: &str| {
-            MODULES.with(|m| m.borrow().get(name).cloned()).or_else(|| crate::bundled::BUNDLED.iter().find(|(n, _)| *n == name).map(|(_, s)| s.to_string()))
-        });
-        crate::model::build_model(root, resolve, &cfg, Rc::new(WasmHost))
-    })();
-    let model = match setup {
+    let model = match setup(root, cfg_text) {
         Ok(m) => m,
         Err(e) => return setup_error_json(&e).0,
     };
     let (res, _checker) = crate::liveness::model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: false }, &mut NoEvents);
     result_json(&model, &res, true)
+}
+
+/// Trace conformance: is `trace` (JSON Lines or a JSON array of observations) a behaviour of `root`
+/// with the given config text? `hidden`: unlogged steps allowed before each observation. `limit`:
+/// maximum number of candidate states (0 = default). `flags`: 1 = stutter, 2 = report a matching
+/// behaviour, 4 = ignore CONSTRAINTs. Returns a pointer to the JSON result; its length is `es_result_len()`.
+#[no_mangle]
+pub unsafe extern "C" fn es_conform(root: *mut u8, root_len: usize, cfg: *mut u8, cfg_len: usize, trace: *mut u8, trace_len: usize, hidden: u32, limit: u32, flags: u32) -> *const u8 {
+    let (root, cfg_text, trace) = (take_str(root, root_len), take_str(cfg, cfg_len), take_str(trace, trace_len));
+    crate::eval::set_stack_limit(56 << 20);
+    let mut opts = crate::conform::ConformOptions { hidden, stutter: flags & 1 != 0, behavior: flags & 2 != 0, constraints: flags & 4 == 0, ..Default::default() };
+    if limit > 0 {
+        opts.limit = limit as usize;
+    }
+    let json = match setup(&root, &cfg_text) {
+        Ok(model) => crate::conform::report_json(&model, &crate::conform::check_trace(&model, &trace, &opts)),
+        Err(e) => setup_error_json(&e).0,
+    };
+    RESULT.with(|r| {
+        *r.borrow_mut() = json.into_bytes();
+        r.borrow().as_ptr()
+    })
 }

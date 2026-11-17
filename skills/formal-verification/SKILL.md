@@ -10,7 +10,9 @@ small model of the design. Use it when the question is "can these events happen 
 breaks a promise?" and the answer depends on interleavings that tests rarely reach.
 
 It verifies the model, not the code. It does not answer "is this function correct for every input";
-use property-based tests or a verifier that runs on the code for that.
+use property-based tests or a verifier that runs on the code for that. To check that the running
+code behaves like the model, record a run and use `everystate conform` (see "Check the real code
+against the model" below).
 
 ## The tool
 
@@ -93,6 +95,126 @@ State 5: <Handle ...>          charges = 2
 
 The same spec checks `EventuallyConfirmed`, a liveness property: under weak fairness on sending,
 handling and receiving, the client always learns the charge went through.
+
+## Check the real code against the model
+
+A pass says the model keeps the promise. It does not say the code behaves like the model. Trace
+conformance closes part of that gap: record what the running code did, then check that the
+recording is a behaviour the spec allows. If it is not, the code took a step the model forbids:
+a bug in the code, or a model that does not describe it.
+
+```sh
+npx everystate conform -trace run.jsonl Spec.tla    # reads Spec.cfg, as for model checking
+```
+
+**Record.** Log one JSON line per step of the model, at the place in the code where the step takes
+effect, using the model's action and variable names. [`example/observe.ts`](example/observe.ts) is
+all it takes:
+
+```ts
+export function observe(action: string | null, state: Record<string, unknown>) {
+  if (TRACE) appendFileSync(TRACE, JSON.stringify({ ts: Date.now(), action, state }) + '\n');
+}
+// In the server:  observe('Handle', { charges: await countCharges(key) });
+```
+
+**The trace** is JSON Lines (or one JSON array of the same objects). Each observation may have:
+
+| Key | Meaning |
+|---|---|
+| `action` | name of the spec action that happened. Left out: any action. |
+| `params` | the action's arguments, `["w1"]` in order or `{"w": "w1"}` by name, for an action `Lease(w)` under `\E w \in Workers`. |
+| `state` | values of some or all variables *after* the step. Variables left out are unconstrained: log what the code knows. |
+
+Other keys (`ts`, `msg`) are ignored, and so are entries with neither `action` nor `state`, so
+observations can sit in an ordinary structured log. The first observation is the initial state; if
+it names an action, the initial state is taken as unlogged.
+
+**Values** are read according to the type the spec's value has, not guessed from the JSON:
+
+| JSON | matches the TLA+ value |
+|---|---|
+| `true`, `3`, `"abc"` | the boolean, the integer, the string |
+| `"w1"` | also the model value `w1` |
+| `[1, 2]` | the sequence `<<1, 2>>` (in order), or the set `{1, 2}` (any order, no duplicates) |
+| `{"a": 1}` | the record `[a |-> 1]`, or a function such as `[w \in Workers |-> ...]` with string, model-value or integer keys (`{"1": "x"}`; a sequence is such a function) |
+| `{"a": 1, "...": 0}` | a record or function with at least `a |-> 1`: one process logging its own entry |
+| `null`, `1.5` | nothing |
+
+Ambiguous on purpose: `[]` matches `<<>>` and `{}`; `{}` matches the empty function, which is
+`<<>>`; a string matches a string and a model value of the same name.
+
+| Option | |
+|---|---|
+| `-hidden N` | up to N steps the log does not show may happen before each observation (default 0: every step is logged) |
+| `-stutter` | an observation without `action` may be a snapshot of an unchanged state. Off by default: every line is a step, so a duplicated event is reported instead of absorbed. Use it for logs that sample state. |
+| `-behavior` | also print one full behaviour of the spec that matches, with the unlogged variables filled in |
+| `-json` | the result as one JSON object: `status`, `failed`, `lastMatched`, `nearest`, `enabled`, `hints` |
+| `-limit N`, `-noconstraints` | cap on the spec states tracked at once (default 100000); ignore `CONSTRAINT` bounds |
+
+| Exit | Meaning |
+|---|---|
+| 0 | the trace is a behaviour of the spec |
+| 20 | it is not: the report names the first line that cannot be matched |
+| 12 | the spec allows the run, but the run violates an `INVARIANT` of the `.cfg`: the model is wrong |
+| 21 / 22 | the trace is malformed / too many candidate states, no verdict |
+| 150 / 151 | the spec / the `.cfg` does not parse |
+
+**Worked example.** `example/charge-ok.jsonl` is a run of the charge client and server with one
+retry; `example/charge-double.jsonl` is a run where the server charged again on the retry.
+
+```sh
+cd example
+npx everystate conform -trace charge-ok.jsonl Charge.tla       # exit 0
+npx everystate conform -trace charge-double.jsonl Charge.tla   # exit 20
+```
+
+```
+Trace conforms: 6 observations matched; the recorded run is a behaviour of Charge.
+```
+
+```
+Error: Trace does not conform to Charge: line 5 (observation 5 of 6) cannot be matched.
+
+  line 5: {"action":"Handle","state":{"charges":2}}
+  last matched: line 4 (1 spec state consistent with the trace up to there)
+  before this step: charges = 1
+
+Handle can happen here, but it does not produce the observed values.
+Closest step the spec allows:
+  Handle: charges is 1 in the spec, 2 in the trace
+Steps the spec allows here, and the observed variables after each:
+  Send       charges = 1
+  Handle     charges = 1
+  LoseReply  charges = 1
+  Receive    charges = 1
+```
+
+Read it as: the model says the second `Handle` leaves `charges` at 1 (the server has seen the key),
+the code made it 2. Here the code is wrong. Against the model of a server that forgets the key, the
+same run is allowed and breaks the promise instead:
+
+```sh
+npx everystate conform -trace charge-double.jsonl -config ChargeBroken.cfg Charge.tla   # exit 12
+```
+
+```
+Error: Invariant ChargedAtMostOnce is violated by the recorded behaviour at line 5.
+```
+
+(Shortened: the full output prints the behaviour up to that line.)
+
+**Using it well.**
+
+- On a mismatch, decide against the code which side is wrong, as with a counterexample. If the
+  report hints that `-hidden` or `-stutter` would match, the log is missing steps or repeats them:
+  fix the logging in preference to loosening the check.
+- Observations must be in the order the steps happened. With several processes, write through one
+  ordered log, or log per process and check each process's actions separately with `-hidden`.
+- The fewer variables logged, the more runs conform. Log the variables the promise is about, and
+  name the action.
+- A pass covers the runs recorded, on the variables logged. It is a test, not a proof: keep it in
+  CI next to the model check, fed by an integration test that exercises retries and failures.
 
 ## A `.cfg` in brief
 

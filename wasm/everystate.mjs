@@ -1,4 +1,5 @@
-// everystate as WebAssembly: the same `check({ root, modules, config, deadlock?, print? })` API as the
+// everystate as WebAssembly: `conform(...)` for trace conformance, and the same
+// `check({ root, modules, config, deadlock?, print? })` API as the
 // TypeScript package's index.ts, backed by the Rust engine. Works in Node and Bun out of the box (the
 // .wasm file next to this module is read synchronously); in a browser or worker call `init()` first
 // with the compiled module, its bytes, or a fetch() Response.
@@ -40,11 +41,8 @@ export class TlaError extends Error {
 /** Formats a value of a trace state (they are already strings in TLC syntax). */
 export const fmt = v => String(v);
 
-/**
- * Model-check a specification held in memory.
- * @param {{root: string, modules: Record<string,string>, config: string, deadlock?: boolean, print?: (line: string) => void}} input
- */
-export function check(input) {
+/** A fresh instance with the module sources loaded; `put` copies a string into its memory. */
+function instantiate(input) {
   const module = load();
   let memory;
   const print = input.print ?? (() => {});
@@ -63,15 +61,27 @@ export function check(input) {
     return [p, b.length];
   };
   for (const [name, src] of Object.entries(input.modules)) ex.es_add_module(...put(name), ...put(src));
+  const result = p => JSON.parse(dec.decode(new Uint8Array(memory.buffer, p, ex.es_result_len())));
+  return { ex, put, result };
+}
+
+// The engine's call stack (RangeError) or the 64 MiB linear-memory stack (RuntimeError) ran out.
+const isStackOverflow = e => e instanceof RangeError || (typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError);
+const STACK_MESSAGE = 'Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.';
+
+/**
+ * Model-check a specification held in memory.
+ * @param {{root: string, modules: Record<string,string>, config: string, deadlock?: boolean, print?: (line: string) => void}} input
+ */
+export function check(input) {
+  const { ex, put, result: read } = instantiate(input);
   let json;
   try {
-    const p = ex.es_check(...put(input.root), ...put(input.config), (input.deadlock ?? true) ? 1 : 0);
-    json = JSON.parse(dec.decode(new Uint8Array(memory.buffer, p, ex.es_result_len())));
+    json = read(ex.es_check(...put(input.root), ...put(input.config), (input.deadlock ?? true) ? 1 : 0));
   } catch (e) {
-    // The engine's call stack (RangeError) or the 64 MiB linear-memory stack (RuntimeError) ran out.
-    if (e instanceof RangeError || (typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError)) {
+    if (isStackOverflow(e)) {
       return {
-        result: { status: 'error', message: 'Stack overflow while evaluating the specification (recursion too deep). Re-run with a larger stack.', generated: 0, distinct: 0, queue: 0, depth: 0 },
+        result: { status: 'error', message: STACK_MESSAGE, generated: 0, distinct: 0, queue: 0, depth: 0 },
         model: { vars: [] },
       };
     }
@@ -87,6 +97,27 @@ export function check(input) {
     trace: json.trace?.map(t => ({ action: act(t.action), state: vars.map(v => t.state[v]) })),
   };
   return { result, model: { vars: vars.map(name => ({ name })) } };
+}
+
+/**
+ * Trace conformance: is a recorded run of the real system a behaviour of the specification?
+ * `trace` is JSON Lines text, the text of a JSON array, or an array of observation objects
+ * `{ action?, params?, state? }`. Returns the same object as `everystate conform -json`.
+ * @param {{root: string, modules: Record<string,string>, config: string, trace: string | object[], hidden?: number, stutter?: boolean, behavior?: boolean, constraints?: boolean, limit?: number, print?: (line: string) => void}} input
+ */
+export function conform(input) {
+  const { ex, put, result: read } = instantiate(input);
+  const trace = typeof input.trace === 'string' ? input.trace : input.trace.map(o => JSON.stringify(o)).join('\n');
+  const flags = (input.stutter ? 1 : 0) | (input.behavior ? 2 : 0) | (input.constraints === false ? 4 : 0);
+  let json;
+  try {
+    json = read(ex.es_conform(...put(input.root), ...put(input.config), ...put(trace), input.hidden ?? 0, input.limit ?? 0, flags));
+  } catch (e) {
+    if (isStackOverflow(e)) return { status: 'error', message: STACK_MESSAGE, observations: 0, ignored: 0, matched: 0, candidates: 0 };
+    throw e;
+  }
+  if (json.status === 'setup-error') throw new TlaError(json.message, json.kind);
+  return json;
 }
 
 /**
