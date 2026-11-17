@@ -23,6 +23,7 @@
     "wasm/everystate.d.ts",
     "wasm/everystate.wasm",
     "wasm/cli.mjs",
+    "skills",
     "README.md",
     "LICENSE"
   ],
