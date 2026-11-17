@@ -925,11 +925,16 @@ pub fn level(ck: &mut Checker, events: &mut dyn Events) -> bool {
 /// read them all (`-dump`, liveness).
 pub fn finish(ck: &mut Checker) {
     if let Some(mut par) = ck.par.take() {
-        par.engine = None;
         if std::env::var_os("EVERYSTATE_PAR_DEBUG").is_some() {
+            // Linux: CPU time of this thread and of all threads, in ms (the workers are still alive)
+            let cpu = |path: &std::path::Path| std::fs::read_to_string(path).ok().and_then(|t| t.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).unwrap_or(0.0) / 1e6;
+            let main = cpu(std::path::Path::new("/proc/thread-self/schedstat"));
+            let all: f64 = std::fs::read_dir("/proc/self/task").map(|d| d.flatten().map(|e| cpu(&e.path().join("schedstat"))).sum()).unwrap_or(0.0);
+            eprintln!("par cpu: {:.0} ms main thread, {:.0} ms other threads", main, all - main);
             eprintln!("par: {} levels, {} of {} states expanded by workers{}", par.stats.0, par.stats.1, ck.head, par.stats.2.as_ref().map_or(String::new(), |w| format!("; stopped: {}", w)));
             eprintln!("par times: {:.0} ms before, {:.0} ms workers, {:.0} ms merge, {:.0} ms total", par.times.0, par.times.1, par.times.2, ck.ev.host.borrow().now_ms() - par.t0);
         }
+        par.engine = None;
         if ck.opts.record_graph {
             par.materialize(ck, 0);
             par.store = vec![];
