@@ -20,6 +20,9 @@ const cfg = fs.readFileSync(config ?? path.join(dir, root + '.cfg'), 'utf8');
 try {
   const { result } = check({ root, modules, config: cfg, deadlock, print: l => console.log(l) });
   console.log(JSON.stringify({ status: result.status, name: result.name, message: result.message, generated: result.generated, distinct: result.distinct, queue: result.queue, depth: result.depth }));
+  // the native binary's exit status
+  const codes = { ok: 0, assumption: 10, deadlock: 11, invariant: 12, 'invariant-init': 12, 'action-property': 13, 'implied-init': 13, liveness: 13, incomplete: 75 };
+  process.exitCode = codes[result.status] ?? 255;
 } catch (e) {
   console.log(JSON.stringify({ status: 'setup-error', message: e.message }));
   process.exit(150);
