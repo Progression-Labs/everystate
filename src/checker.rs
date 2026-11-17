@@ -226,8 +226,10 @@ pub struct Checker<'a> {
     /// only (see `state_at`).
     pub(crate) empty: StateRef,
     /// Index of the first state of the next level while the search may still go parallel; usize::MAX otherwise.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) level_end: usize,
     pub(crate) last_progress: f64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) t_start: f64,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) par: Option<Box<crate::par::Par>>,
