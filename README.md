@@ -100,6 +100,14 @@ operators.
 shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
 this way.
 
+## Agent skill
+
+[`skills/formal-verification`](skills/formal-verification/SKILL.md) teaches a coding agent to
+model-check a design with everystate: choose the promise, model the steps, run the check, see it
+fail, report the counterexample in the code's words. It comes with a worked example
+(`example/Charge.tla`). Copy the folder into your agent's skills directory, for example
+`.claude/skills/`.
+
 ## Options
 
 ```
