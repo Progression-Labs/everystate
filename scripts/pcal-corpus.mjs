@@ -284,22 +284,32 @@ if (checkN > 0) {
     if (done >= checkN) break;
     if (c.corpus !== 'examples' || e.status !== 0) continue;
     const name = path.basename(c.file, '.tla');
-    if (!fs.existsSync(path.join(path.dirname(c.file), `${name}.cfg`))) continue;
-    const before = check(path.dirname(c.file), name);
-    if (!before || before.status === 'setup-error') continue;
+    const src = path.dirname(c.file);
+    // the models of this module: Name.cfg, and M.cfg for each module M that extends or instantiates it
+    const uses = new RegExp(`\\b(EXTENDS|INSTANCE)\\b[^\\n]*\\b${name}\\b`);
+    const models = fs.readdirSync(src).filter(f => f.endsWith('.cfg')).map(f => f.slice(0, -4))
+      .filter(m => fs.existsSync(path.join(src, `${m}.tla`)) && (m === name || uses.test(fs.readFileSync(path.join(src, `${m}.tla`), 'latin1'))));
+    if (models.length === 0) continue;
     const dir = fs.mkdtempSync(path.join(scratch, 'check-'));
-    fs.cpSync(path.dirname(c.file), dir, { recursive: true });
+    fs.cpSync(src, dir, { recursive: true });
     const t = spawnSync(bin, ['pcal', '-nocfg', `${name}.tla`], { cwd: dir, encoding: 'utf8' });
-    const after = t.status === 0 ? check(dir, name) : null;
-    fs.rmSync(dir, { recursive: true, force: true });
-    done++;
-    if (after && JSON.stringify(before) === JSON.stringify(after)) same++;
-    else {
-      checkFail++;
-      console.log(`CHECK FAIL ${c.id}: before ${JSON.stringify(before)}, after ${JSON.stringify(after)}`);
+    for (const m of models) {
+      if (done >= checkN) break;
+      const before = check(src, m);
+      if (!before || before.status === 'setup-error') continue;
+      const after = t.status === 0 ? check(dir, m) : null;
+      done++;
+      if (after && JSON.stringify(before) === JSON.stringify(after)) {
+        same++;
+        if (show) console.log(`CHECK ok ${c.id} with ${m}.cfg: ${JSON.stringify(after)}`);
+      } else {
+        checkFail++;
+        console.log(`CHECK FAIL ${c.id} with ${m}.cfg: before ${JSON.stringify(before)}, after ${JSON.stringify(after)}`);
+      }
     }
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  console.log(`model-checked ${done} re-translated Examples specs: ${same} with unchanged status and state counts`);
+  console.log(`model-checked ${done} models of re-translated Examples specs: ${same} with unchanged status and state counts`);
 }
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(`PASS ${pass} of ${results.length}`);

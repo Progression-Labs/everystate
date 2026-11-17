@@ -375,6 +375,7 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
             }
             "-h" | "-help" | "--help" => {
                 host.print(USAGE);
+                host.print(crate::pcal::USAGE);
                 return 0;
             }
             "-version" | "--version" => {

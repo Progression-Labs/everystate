@@ -16,6 +16,8 @@ pub mod trans;
 use ast::{Ast, V};
 use std::collections::HashSet;
 
+/// The part of `everystate -help` about the translator.
+pub const USAGE: &str = "\nPlusCal: everystate pcal [options] FILE[.tla]   translate the PlusCal algorithm in FILE (as java pcal.trans does;\n                                                 `everystate pcal -help FILE` lists the options)\n         everystate pcal --check FILE[.tla] ...   say whether the algorithm or its translation changed since translation\n";
 pub const VERSION: &str = "1.12";
 pub const MOD_DATE: &str = "01 July 2024";
 const VERSION_WEIGHT: i32 = 1903;
