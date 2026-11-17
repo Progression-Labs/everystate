@@ -33,6 +33,7 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 
 ```sh
 npm install -g everystate     # prebuilt binary for Linux, macOS and Windows
+brew install mattzcarey/tap/everystate
 cargo install everystate      # or build from source
 ```
 

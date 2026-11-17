@@ -106,6 +106,28 @@ jobs:
             (cd "$dir" && tar czf "../../dist/$name.tar.gz" *)
           done
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+      # Needs a repository secret HOMEBREW_TAP_TOKEN: a fine-grained token with Contents write access
+      # to mattzcarey/homebrew-tap only. Skipped when the secret is not set.
+      - name: Is the tap token set?
+        id: tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: if [ -n "$TAP_TOKEN" ]; then echo "token=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Update the Homebrew formula
+        if: steps.publish.outputs.published == 'true' && steps.tap.outputs.token == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/mattzcarey/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          node scripts/brew-formula.mjs "$VERSION" dist > tap/Formula/everystate.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/everystate.rb
+          git diff --cached --quiet || git commit -m "everystate $VERSION"
+          git push
 
   # crates.io trusted publishing: the crate lists this repository and release.yml as its trusted publisher.
   crate:
