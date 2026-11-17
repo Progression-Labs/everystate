@@ -13,8 +13,7 @@
     }
   },
   "bin": {
-    "everystate": "bin/everystate.mjs",
-    "everystate-java": "bin/everystate.mjs"
+    "everystate": "bin/everystate.mjs"
   },
   "files": [
     "bin/everystate.mjs",

@@ -115,12 +115,6 @@ result.name;     // 'NeverFour'
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
 
-### In place of Java TLC
-
-`everystate java ...` (or `everystate-java ...` from npm) accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
-shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
-this way.
-
 ## Agent skill
 
 [`skills/formal-verification`](skills/formal-verification/SKILL.md) teaches a coding agent to
