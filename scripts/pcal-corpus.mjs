@@ -213,8 +213,8 @@ if (args.includes('--validate')) {
     // a change of the algorithm (which may also make it unparsable)
     algorithm: t => t.replace(/:=/, ':= 0 +'),
     broken: t => t.replace(/:=/, ':= ('),
-    translation: t => t.replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1\n'),
-    both: t => t.replace(/:=/, ':= 0 +').replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1\n'),
+    translation: t => t.replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1EditedByHand == TRUE\n'),
+    both: t => t.replace(/:=/, ':= 0 +').replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1EditedByHand == TRUE\n'),
   };
   const jobs = [];
   for (const { c, j } of results) {
