@@ -6,6 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { check } from './everystate.mjs';
 const argv = process.argv.slice(2);
+if (argv[0] === 'pcal') {
+  console.error('everystate: the pcal command needs the native binary; from JavaScript, translatePlusCal() of this package translates the text of a module.');
+  process.exit(1);
+}
 let config = null, deadlock = true, spec = null;
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === '-config') config = argv[++i];

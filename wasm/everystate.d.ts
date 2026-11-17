@@ -31,3 +31,35 @@ export function check(input: CheckInput): { result: CheckResult; model: { vars: 
 export function fmt(value: unknown): string;
 /** Under Node: runs `check` in a worker thread with a `stackSizeMb` call stack (default 256). */
 export function checkAsync(input: CheckInput, options?: { stackSizeMb?: number }): Promise<{ result: CheckResult; model: { vars: { name: string }[] } }>;
+
+export interface PlusCalOptions {
+  /** Fairness of the generated Spec: `wf`/`sf` (of each process), `wfNext` (of Next) or `nof` (none). */
+  fairness?: 'wf' | 'sf' | 'wfNext' | 'nof';
+  /** Add missing labels (required when the algorithm has some labels but not all it needs). */
+  label?: boolean;
+  /** Prefix of added labels (default `Lbl_`). */
+  labelRoot?: string;
+  /** Translate for checking termination: the default fairness becomes `wf`. */
+  termination?: boolean;
+  /** Do not add the disjunct that allows stuttering after termination. */
+  noDoneDisjunct?: boolean;
+  /** Preferred width of the generated lines (default 78, at least 60). */
+  lineWidth?: number;
+  /** Translate as an earlier PlusCal version did (e.g. `'1.4'`). */
+  version?: string;
+}
+export interface PlusCalTranslation {
+  /** The text of the module with the new translation (lines end with "\n"), or null if the translation failed. */
+  output: string | null;
+  /** Why the translation failed (the translator's error messages, with line and column). */
+  errors: string[];
+  /** Everything the translator printed. */
+  messages: string[];
+}
+/**
+ * Translates the PlusCal algorithm in the text of a module to TLA+ between its BEGIN TRANSLATION and
+ * END TRANSLATION lines (added after the algorithm if missing), with the output of `java pcal.trans`.
+ * `options` are the translator's command-line options (`['-wf', '-termination']`) or their object form.
+ * Pure: no file is read or written (so no .cfg and no .old file).
+ */
+export function translatePlusCal(source: string, options?: string[] | PlusCalOptions): PlusCalTranslation;
