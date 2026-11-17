@@ -6,9 +6,13 @@
 //! then repeatedly pick an action at random, compute all its successors, check every one of them
 //! (invariants, action properties), drop those outside the state and action constraints, and move to one
 //! of the remaining ones at random. An action without admissible successors is replaced by the next one
-//! (in a random stride) until every action has been tried; if none has a successor the behaviour ends
-//! there, which is a deadlock unless deadlock checking is off. A behaviour that ends without an error is
-//! checked against the temporal properties.
+//! (in a random stride) until every action has been tried; if none has one the behaviour ends there. A
+//! behaviour that ends without an error is checked against the temporal properties.
+//!
+//! One deliberate difference: TLC's simulator reports "Deadlock reached" whenever no action has an
+//! admissible successor, also when successors exist and the CONSTRAINTs merely exclude them, which
+//! makes it report deadlocks on models that exhaustive checking passes. Here a deadlock is a state
+//! without any successor, as in exhaustive checking; a behaviour that runs into the constraints just ends.
 //!
 //! The random choices come from a small seeded generator (no operating-system randomness, so the
 //! WebAssembly build behaves the same): a run is reproduced by passing the seed it printed. The numbers
@@ -175,8 +179,12 @@ impl<'a, 'o> Sim<'a, 'o> {
     fn error(&self, message: String, trace: Option<Vec<TraceStep>>) -> CheckResult {
         self.fix(self.ck.error(message, trace))
     }
-    fn outcome(&self, result: CheckResult, summary: bool, final_progress: bool) -> SimOutcome {
-        SimOutcome { result, stats: self.stats.clone(), summary, final_progress }
+    fn outcome(&self, mut result: CheckResult, summary: bool, final_progress: bool) -> SimOutcome {
+        let mut stats = self.stats.clone();
+        // the behaviour that ends in the error counts towards the longest one
+        stats.longest = stats.longest.max(result.trace.as_ref().map_or(0, |t| t.len().min(u32::MAX as usize) as u32));
+        result.depth = stats.longest;
+        SimOutcome { result, stats, summary, final_progress }
     }
 
     /// The behaviour as TLC reports it: finite stuttering (a step that changes nothing) is left out.
@@ -248,6 +256,7 @@ impl<'a, 'o> Sim<'a, 'o> {
             }
             pi = (pi + 1) % PRIMES.len();
         }
+        let mut has_successor = false;
         for _ in 0..n {
             succs.clear();
             keep.clear();
@@ -268,6 +277,7 @@ impl<'a, 'o> Sim<'a, 'o> {
                 });
             }
             self.stats.generated += ev.extra_generated.replace(0);
+            has_successor |= !succs.is_empty();
             for t in succs.iter() {
                 self.stats.generated += 1;
                 ev.stats.generated.set(self.stats.generated as i64);
@@ -333,7 +343,7 @@ impl<'a, 'o> Sim<'a, 'o> {
             }
             index = (index + stride) % n;
         }
-        if self.opts.check_deadlock {
+        if self.opts.check_deadlock && !has_successor {
             let mut r = self.result("deadlock");
             r.trace = Some(self.compress(trace, None));
             return Err(self.outcome(r, true, true));
@@ -395,6 +405,42 @@ impl<'a, 'o> Sim<'a, 'o> {
         }
     }
 
+    /// Replays the trace of a result with the exhaustive checker's functions: the first state must be
+    /// one of its initial states and every step (the step back to the start of a liveness loop
+    /// included) one of the successors it computes, by the action the trace names.
+    fn replay(&self, r: &CheckResult) -> Result<(), String> {
+        let tr = match &r.trace {
+            Some(t) if !t.is_empty() => t,
+            _ => return Ok(()),
+        };
+        let n = self.nvars;
+        let describe = |e: Box<Fail>| self.ck.describe_err(&e, true);
+        let inits = self.ck.init_states().map_err(|r| r.message.unwrap_or_default())?;
+        if !inits.iter().any(|s| same_state(s, &tr[0].state, n)) {
+            return Err("state 1 is not an initial state".into());
+        }
+        let (mut succs, mut acts) = (vec![], vec![]);
+        let mut steps: Vec<(usize, usize, Option<usize>)> = (1..tr.len()).map(|i| (i - 1, i, tr[i].action)).collect();
+        if let Some(l) = r.loop_to {
+            if l >= 0 {
+                steps.push((tr.len() - 1, l as usize, r.loop_action));
+            }
+        }
+        for (i, j, action) in steps {
+            let (s, t) = (&tr[i].state, &tr[j].state);
+            if (0..n).any(|k| t.is_undef(k)) {
+                continue; // the incompletely specified successor that the error is about
+            }
+            succs.clear();
+            acts.clear();
+            self.ck.successors(s, &mut succs, &mut acts).map_err(describe)?;
+            if !succs.iter().zip(acts.iter()).any(|(u, a)| same_state(u, t, n) && Some(*a as usize) == action) {
+                return Err(format!("state {} is not a successor of state {} by the action named", j + 1, i + 1));
+            }
+        }
+        Ok(())
+    }
+
     /// `file=PREFIX`: the behaviour as a TLA+ module, in TLC's layout.
     fn write_trace(&self, prefix: &str, number: u64, trace: &[TraceStep], first: &str) -> Result<(), String> {
         let file = format!("{}_0_{}", prefix, number);
@@ -422,6 +468,21 @@ pub fn simulate(model: &Model, opts: &SimOptions, events: &mut dyn SimEvents) ->
     ev.stats.sim.set(Some((opts.depth.map_or(-1, |d| d as i64), opts.num.map_or(-1, |n| n.min(i64::MAX as u64) as i64), opts.seed, opts.aril)));
     ev.stats.traces.set(0);
     let mut sim = Sim { model, ck, ev, opts, rng, stats: SimStats::default(), nvars: model.vars.len(), partial: RefCell::new(None), live: None };
+    let mut out = run(&mut sim, events);
+    // Self-check for the test suite (EVERYSTATE_SIM_REPLAY=1): a reported trace must be a behaviour
+    // according to the functions the exhaustive checker explores the state space with.
+    let host = ev.host.borrow().clone();
+    if host.env().iter().any(|(k, v)| k == "EVERYSTATE_SIM_REPLAY" && v == "1") {
+        if let Err(why) = sim.replay(&out.result) {
+            out.result = sim.error(format!("Internal error: the trace reported by the simulation is not a behavior of the specification ({}).", why), out.result.trace.take());
+            out.result.status = "replay-failed";
+        }
+    }
+    out
+}
+
+fn run(sim: &mut Sim, events: &mut dyn SimEvents) -> SimOutcome {
+    let (model, opts, ev) = (sim.model, sim.opts, sim.ev);
     match PreparedLiveness::new(model, &sim.ck) {
         Err(r) => return sim.outcome(sim.fix(r), false, false),
         Ok(l) => sim.live = l,
@@ -702,6 +763,8 @@ pub(crate) fn run_cli(rep: &Reporter, model: &Model, opts: &SimOptions, deadlock
         75
     } else if res.code == Some(2111) {
         76
+    } else if res.code == Some(2404) {
+        10 // a false POSTCONDITION: TLC's exit status for it
     } else {
         exit_code(res.status)
     };

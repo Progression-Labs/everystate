@@ -1,4 +1,4 @@
-// everystate as WebAssembly: the same `check({ root, modules, config, deadlock?, print? })` API as the
+// everystate as WebAssembly: the same `check({ root, modules, config, deadlock?, simulate?, print? })` API as the
 // TypeScript package's index.ts, backed by the Rust engine. Works in Node and Bun out of the box (the
 // .wasm file next to this module is read synchronously); in a browser or worker call `init()` first
 // with the compiled module, its bytes, or a fetch() Response.
@@ -41,8 +41,10 @@ export class TlaError extends Error {
 export const fmt = v => String(v);
 
 /**
- * Model-check a specification held in memory.
- * @param {{root: string, modules: Record<string,string>, config: string, deadlock?: boolean, print?: (line: string) => void}} input
+ * Model-check a specification held in memory. With `simulate` (true, or `{ traces?, depth?, seed?, aril? }`)
+ * random behaviours are generated and checked instead of the whole state space, as TLC's -simulate does:
+ * by default 1000 behaviours of at most 100 steps; `result.seed` repeats the run.
+ * @param {{root: string, modules: Record<string,string>, config: string, deadlock?: boolean, simulate?: boolean | {traces?: number, depth?: number, seed?: number, aril?: number}, print?: (line: string) => void}} input
  */
 export function check(input) {
   const module = load();
@@ -65,7 +67,12 @@ export function check(input) {
   for (const [name, src] of Object.entries(input.modules)) ex.es_add_module(...put(name), ...put(src));
   let json;
   try {
-    const p = ex.es_check(...put(input.root), ...put(input.config), (input.deadlock ?? true) ? 1 : 0);
+    const deadlock = (input.deadlock ?? true) ? 1 : 0;
+    const sim = input.simulate === true ? {} : input.simulate;
+    const num = v => (typeof v === 'number' ? Math.trunc(v) : NaN);
+    const p = sim
+      ? ex.es_simulate(...put(input.root), ...put(input.config), deadlock, num(sim.traces) || 0, Number.isNaN(num(sim.depth)) ? -1 : Math.max(0, Math.min(num(sim.depth), 2 ** 31 - 1)), num(sim.seed), num(sim.aril))
+      : ex.es_check(...put(input.root), ...put(input.config), deadlock);
     json = JSON.parse(dec.decode(new Uint8Array(memory.buffer, p, ex.es_result_len())));
   } catch (e) {
     // The engine's call stack (RangeError) or the 64 MiB linear-memory stack (RuntimeError) ran out.
@@ -84,6 +91,7 @@ export function check(input) {
     status: json.status, name: json.name, message: json.message, code: json.code,
     generated: json.generated, distinct: json.distinct, queue: json.queue, depth: json.depth,
     loopTo: json.loopTo, loopAction: json.status === 'liveness' ? act(json.loopAction) : undefined,
+    ...(json.mode === 'simulate' ? { mode: json.mode, traces: json.traces, seed: json.seed, aril: json.aril } : {}),
     trace: json.trace?.map(t => ({ action: act(t.action), state: vars.map(v => t.state[v]) })),
   };
   return { result, model: { vars: vars.map(name => ({ name })) } };

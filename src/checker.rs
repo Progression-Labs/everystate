@@ -706,7 +706,7 @@ impl<'a> Checker<'a> {
     }
 
     // Successors of one state, as (state, action index) pairs in action order.
-    fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
+    pub(crate) fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
         let ev = self.ev;
         let m = self.model;
         let n = self.nvars;
