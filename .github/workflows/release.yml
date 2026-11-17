@@ -20,7 +20,7 @@ jobs:
         include:
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  npm: linux-x64,    exe: everystate }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, npm: linux-arm64,  exe: everystate }
-          - { os: macos-latest,     target: x86_64-apple-darwin,        npm: darwin-x64,   exe: everystate }
+          - { os: macos-15-intel,   target: x86_64-apple-darwin,        npm: darwin-x64,   exe: everystate }
           - { os: macos-latest,     target: aarch64-apple-darwin,       npm: darwin-arm64, exe: everystate }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,     npm: win32-x64,    exe: everystate.exe }  # also covers Windows paths and CRLF checkouts
     runs-on: ${{ matrix.os }}
@@ -34,7 +34,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --bin everystate --target ${{ matrix.target }}
       - name: Smoke test
-        if: matrix.npm != 'darwin-x64'
         shell: bash
         run: |
           set +e
