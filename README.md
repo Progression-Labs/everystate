@@ -3,6 +3,27 @@
 A TLA+ model checker with no Java dependency, written in Rust. It reads ordinary `.tla` specs and
 TLC `.cfg` files, checks every reachable state, and reports results in TLC's format.
 
+```text
+> use everystate's formal verification skill to find race conditions in my amazing software
+
+⏺ Write(Store.tla)
+  // ... models load() and save() from store.ts
+
+⏺ Bash(npx everystate Store.tla)
+
+  Error: Invariant NoLostUpdates is violated.
+  State 2: <Load("a")>   a read 0
+  State 3: <Load("b")>   b read 0
+  State 4: <Save("a")>   memory = 1
+  State 5: <Save("b")>   memory = 1
+
+⏺ Found a race. Two overlapping requests both load before either saves,
+  so one update is lost. Fix: make load-and-save atomic.
+```
+
+(Condensed. The spec is [`examples/Store.tla`](examples/Store.tla); the skill is
+[`skills/formal-verification`](skills/formal-verification/SKILL.md).)
+
 - Safety and liveness checking, fairness, symmetry, `VIEW`, `ALIAS`.
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
 - The standard and community modules are built in.
