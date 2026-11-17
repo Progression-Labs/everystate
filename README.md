@@ -116,6 +116,28 @@ result.name;     // 'NeverFour'
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
 
+## Check the code against the model
+
+A pass verifies the model. To check that the running code behaves like it, log what the code does
+and ask whether that run is a behaviour of the spec:
+
+```sh
+everystate conform -trace run.jsonl Charge.tla
+```
+
+```
+{"state": {"sent": 0, "charges": 0}}
+{"action": "Send", "state": {"sent": 1}}
+{"action": "Handle", "state": {"charges": 2}}
+```
+
+Each line is a step: optionally the action, and whichever variables the code knows. The report
+names the first line the spec does not allow, what it expected, and which steps were possible
+there. Exit status 0 conforms, 20 does not (21 bad trace, 22 limit reached). `-hidden N` allows
+unlogged steps, `-stutter` snapshots, `-behavior` prints a full matching behaviour, `-json`
+structured output. From JavaScript: `conform({ root, modules, config, trace })`. Details are in
+the [skill](skills/formal-verification/SKILL.md).
+
 ## Agent skill
 
 [`skills/formal-verification`](skills/formal-verification/SKILL.md) teaches a coding agent to
