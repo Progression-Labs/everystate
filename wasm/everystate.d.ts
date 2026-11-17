@@ -7,8 +7,24 @@ export interface CheckInput {
   config: string;
   /** Check for deadlock (default: true unless the config says CHECK_DEADLOCK FALSE). */
   deadlock?: boolean;
+  /**
+   * Random simulation (TLC's `-simulate`) instead of exhaustive checking: generate random behaviours
+   * and check each of them. For models too large to enumerate; `status: 'ok'` then only means that no
+   * generated behaviour violates a property. `true` uses the defaults.
+   */
+  simulate?: boolean | SimulateOptions;
   /** Receives output of Print/PrintT. */
   print?: (line: string) => void;
+}
+export interface SimulateOptions {
+  /** Number of behaviours to generate (default 1000; a run is always bounded). */
+  traces?: number;
+  /** Maximal number of steps of a behaviour (default 100, as TLC's `-depth`). */
+  depth?: number;
+  /** Seed of the random choices; the same seed repeats the run. Default: taken from the clock. */
+  seed?: number;
+  /** A second number mixed into the seed (TLC's `-aril`, default 0). */
+  aril?: number;
 }
 export interface TraceStep { action: { name: string } | null; state: string[] }
 export interface CheckResult {
@@ -16,10 +32,21 @@ export interface CheckResult {
   name?: string;
   message?: string;
   code?: number;
+  /** States generated. In a simulation: the initial states plus every successor computed. */
   generated: number;
+  /** Distinct states found (-1 in a simulation, which does not count them). */
   distinct: number;
+  /** States left unexplored (-1 in a simulation). */
   queue: number;
+  /** Depth of the search. In a simulation: the number of states of the longest behaviour. */
   depth: number;
+  /** Present, with the three fields below, when the result comes from a simulation. */
+  mode?: 'simulate';
+  /** Simulation: behaviours generated (including the one that ended in an error). */
+  traces?: number;
+  /** Simulation: the seed used; pass it as `simulate.seed` to repeat the run. */
+  seed?: number;
+  aril?: number;
   /** liveness: index (0-based) of the state the lasso returns to; -1 = stuttering */
   loopTo?: number;
   loopAction?: { name: string } | null;

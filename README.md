@@ -26,6 +26,8 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 
 - Safety and liveness checking, fairness, symmetry, `VIEW`, `ALIAS`.
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
+- Random simulation (`-simulate`) for models too large to enumerate, with seeded, reproducible runs.
+- Trace conformance (`everystate conform`): check a log of the real system against the spec.
 - The standard and community modules are built in.
 - One native binary, or WebAssembly for Node, Bun and workers.
 
@@ -116,6 +118,21 @@ result.name;     // 'NeverFour'
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
 
+## Simulation
+
+When a model is too large to enumerate, `everystate -simulate num=10000 Spec.tla` generates random
+behaviours of up to `-depth` steps (default 100) and checks invariants, action properties, deadlock
+and temporal properties on each, printing TLC's simulation output. A pass means only that no
+generated behaviour violates a property. Without `num=` it runs until it finds an error, as TLC
+does; with `-json` it stops after 1000 behaviours. Every run prints its seed; pass it back with
+`-seed` to repeat the run exactly. From JavaScript:
+`check({ root, modules, config, simulate: { traces: 10000, seed: 1 } })`.
+
+Two differences from TLC: a deadlock is reported only for a state with no successor (TLC's
+simulator also reports one when a `CONSTRAINT` excludes every successor), and a state predicate
+given as `PROPERTY` is checked on the initial states (TLC's simulator skips it). Random choices
+differ from Java TLC's, so the same seed gives a different run there.
+
 ## Check the code against the model
 
 A pass verifies the model. To check that the running code behaves like it, log what the code does
@@ -174,7 +191,7 @@ them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
-Simulation mode, multiple workers, disk-backed state storage (everything is in memory, so a few
+Multiple workers, disk-backed state storage (everything is in memory, so a few
 million distinct states is the practical limit), the PlusCal translator (already-translated specs
 work), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
 are parsed and skipped).

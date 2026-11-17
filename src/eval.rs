@@ -391,6 +391,10 @@ pub struct Stats {
     pub check_deadlock: Cell<bool>,
     pub stop_requested: Cell<bool>,
     pub active: Cell<bool>,
+    /// simulation mode: (trace depth, number of traces asked for or -1, seed, aril)
+    pub sim: Cell<Option<(i64, i64, i64, i64)>>,
+    /// simulation mode: number of the behaviour being generated
+    pub traces: Cell<i64>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]

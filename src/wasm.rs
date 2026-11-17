@@ -78,7 +78,32 @@ pub unsafe extern "C" fn es_check(root: *mut u8, root_len: usize, cfg: *mut u8, 
     let (root, cfg_text) = (take_str(root, root_len), take_str(cfg, cfg_len));
     // The shadow stack is 64 MiB (see .cargo/config.toml); stop cleanly before it is exhausted.
     crate::eval::set_stack_limit(56 << 20);
-    let json = run(&root, &cfg_text, deadlock != 0);
+    let json = run(&root, &cfg_text, deadlock != 0, None);
+    RESULT.with(|r| {
+        *r.borrow_mut() = json.into_bytes();
+        r.borrow().as_ptr()
+    })
+}
+
+/// Random simulation of `root` (TLC's `-simulate`) instead of exhaustive checking. `traces`: number of
+/// behaviours to generate (0 or NaN: the default of 1000; a run in WebAssembly cannot be interrupted, so
+/// it is always bounded). `depth`: maximal number of steps of a behaviour (negative: the default of
+/// 100). `seed`, `aril`: integers selecting the random choices (NaN seed: taken from the clock; the
+/// result reports it). Returns the JSON result like `es_check`.
+#[no_mangle]
+pub unsafe extern "C" fn es_simulate(root: *mut u8, root_len: usize, cfg: *mut u8, cfg_len: usize, deadlock: i32, traces: f64, depth: i32, seed: f64, aril: f64) -> *const u8 {
+    use crate::simulate::{clock_seed, SimOptions, DEFAULT_DEPTH, DEFAULT_TRACES};
+    let (root, cfg_text) = (take_str(root, root_len), take_str(cfg, cfg_len));
+    crate::eval::set_stack_limit(56 << 20);
+    let opts = SimOptions {
+        num: Some(if traces >= 1.0 { traces as u64 } else { DEFAULT_TRACES }),
+        depth: Some(if depth >= 0 { depth as u32 } else { DEFAULT_DEPTH }),
+        seed: if seed.is_nan() { clock_seed(es_now()) } else { seed as i64 },
+        aril: if aril.is_nan() { 0 } else { aril as i64 },
+        check_deadlock: deadlock != 0,
+        trace_file: None,
+    };
+    let json = run(&root, &cfg_text, deadlock != 0, Some(opts));
     RESULT.with(|r| {
         *r.borrow_mut() = json.into_bytes();
         r.borrow().as_ptr()
@@ -98,11 +123,16 @@ fn setup(root: &str, cfg_text: &str) -> R<crate::model::Model> {
     crate::model::build_model(root, resolve, &cfg, Rc::new(WasmHost))
 }
 
-fn run(root: &str, cfg_text: &str, deadlock: bool) -> String {
+fn run(root: &str, cfg_text: &str, deadlock: bool, sim: Option<crate::simulate::SimOptions>) -> String {
     let model = match setup(root, cfg_text) {
         Ok(m) => m,
         Err(e) => return setup_error_json(&e).0,
     };
+    if let Some(mut opts) = sim {
+        opts.check_deadlock = deadlock && model.check_deadlock;
+        let out = crate::simulate::simulate(&model, &opts, &mut crate::simulate::NoSimEvents);
+        return crate::simulate::sim_json(&model, &out, &opts, true);
+    }
     let (res, _checker) = crate::liveness::model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: false }, &mut NoEvents);
     result_json(&model, &res, true)
 }

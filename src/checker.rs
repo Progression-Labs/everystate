@@ -460,7 +460,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Re-run a failing evaluation while recording the chain of nested expressions being evaluated.
-    fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
+    pub fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
         let ev = self.ev;
         ev.trace_stack.borrow_mut().clear();
         ev.tracing.set(true);
@@ -556,7 +556,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn missing(&self, s: &StateData) -> Vec<String> {
+    pub fn missing(&self, s: &StateData) -> Vec<String> {
         let mut v: Vec<String> = self.model.vars.iter().enumerate().filter(|(j, _)| s.is_undef(*j)).map(|(_, d)| d.name.to_string()).collect();
         v.sort();
         v
@@ -597,6 +597,21 @@ impl<'a> Checker<'a> {
         let r = go(self, &self.model.inits, 0, &buf, &mut found);
         ev.init_mode.set(false);
         r.map(|_| found)
+    }
+
+    /// As `enumerate_init`, with a failure already turned into a result; no initial predicate gives no states.
+    pub fn init_states(&self) -> Result<Vec<StateRef>, CheckResult> {
+        if self.model.inits.is_empty() {
+            return Ok(vec![]);
+        }
+        self.enumerate_init().map_err(|e| match *e {
+            Fail::Check { status, message } => {
+                let mut r = self.result(status);
+                r.message = Some(message);
+                r
+            }
+            ref other => self.error(self.describe_err(other, true), None),
+        })
     }
 
     // Enumerate initial states.

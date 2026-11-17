@@ -61,7 +61,7 @@ pub fn loc_str(loc: &Loc, module: &str) -> String {
     format!("line {}, col {} to line {}, col {} of module {}", loc[0], loc[1], loc[2], loc[3], module)
 }
 
-fn body_loc(d: Sym) -> (Loc, String) {
+pub(crate) fn body_loc(d: Sym) -> (Loc, String) {
     match d {
         Sym::Def(dd) => {
             let mut o = dd.resolved();

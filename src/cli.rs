@@ -86,14 +86,19 @@ fn commas(n: f64) -> String {
     if neg { format!("-{}", out) } else { out }
 }
 
+/// The value of a variable in TLC syntax; `null` for a variable the state leaves unassigned (only the
+/// last state of a simulation trace that an action did not completely specify has such variables).
+pub(crate) fn var_text(s: &StateRef, i: usize) -> String {
+    if s.is_undef(i) { "null".to_string() } else { fmt(&s.get(i)) }
+}
 pub fn state_text(model: &Model, s: &StateRef) -> String {
     let vars = &model.vars;
     if vars.len() == 1 {
-        return format!("{} = {}\n", vars[0].name, ppr(&fmt(&s.get(0))));
+        return format!("{} = {}\n", vars[0].name, ppr(&var_text(s, 0)));
     }
     let mut out = String::new();
     for (i, v) in vars.iter().enumerate() {
-        out += &format!("/\\ {} = {}\n", v.name, ppr(&fmt(&s.get(i))));
+        out += &format!("/\\ {} = {}\n", v.name, ppr(&var_text(s, i)));
     }
     out
 }
@@ -104,13 +109,16 @@ pub fn action_label(a: Option<&Action>) -> String {
     }
 }
 
-struct Reporter {
-    tool: bool,
-    host: HostRef,
+pub(crate) struct Reporter {
+    pub(crate) tool: bool,
+    pub(crate) host: HostRef,
+    /// Simulation mode only: the label of the first state of a trace (TLC names the initial predicate
+    /// there instead of printing `<Initial predicate>`).
+    pub(crate) init_label: RefCell<Option<String>>,
 }
 impl Reporter {
     // cls: 0 none, 1 error, 2 bug, 3 warning, 4 state
-    fn msg(&self, code: u32, cls: u32, text: &str) {
+    pub(crate) fn msg(&self, code: u32, cls: u32, text: &str) {
         if self.tool {
             self.host.print(&format!("@!@!@STARTMSG {}:{} @!@!@\n{}\n@!@!@ENDMSG {} @!@!@\n", code, cls, text, code));
         } else {
@@ -126,12 +134,12 @@ impl Reporter {
     fn plain(&self, text: &str) {
         self.host.print(&format!("{}\n", text));
     }
-    fn now(&self) -> String {
+    pub(crate) fn now(&self) -> String {
         timestamp(self.host.now_ms())
     }
 }
 
-fn exit_code(status: &str) -> i32 {
+pub(crate) fn exit_code(status: &str) -> i32 {
     match status {
         "ok" => 0,
         "assumption" => 10,
@@ -171,6 +179,12 @@ fn json_str(s: &str, o: &mut String) {
 
 /// The `-json` result line (also what the WebAssembly API returns).
 pub fn result_json(model: &Model, res: &CheckResult, extended: bool) -> String {
+    let counts = format!(",\"generated\":{},\"distinct\":{},\"queue\":{},\"depth\":{}", res.generated, res.distinct, res.queue, res.depth);
+    result_json_with(model, res, extended, &counts)
+}
+
+/// `result_json` with the given text for the state counts (simulation mode reports its own).
+pub fn result_json_with(model: &Model, res: &CheckResult, extended: bool, counts: &str) -> String {
     let mut o = String::with_capacity(256);
     o.push_str("{\"status\":");
     json_str(res.status, &mut o);
@@ -182,7 +196,7 @@ pub fn result_json(model: &Model, res: &CheckResult, extended: bool) -> String {
         o.push_str(",\"message\":");
         json_str(m, &mut o);
     }
-    o.push_str(&format!(",\"generated\":{},\"distinct\":{},\"queue\":{},\"depth\":{}", res.generated, res.distinct, res.queue, res.depth));
+    o.push_str(counts);
     if let Some(l) = res.loop_to {
         o.push_str(&format!(",\"loopTo\":{}", l));
     }
@@ -224,7 +238,7 @@ pub fn result_json(model: &Model, res: &CheckResult, extended: bool) -> String {
                 }
                 json_str(&v.name.to_string(), &mut o);
                 o.push(':');
-                json_str(&fmt(&t.state.get(j)), &mut o);
+                json_str(&var_text(&t.state, j), &mut o);
             }
             o.push_str("}}");
         }
@@ -313,7 +327,7 @@ impl Events for CliEvents<'_> {
     }
 }
 
-const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\n       everystate conform [options] -trace TRACE SPEC[.tla]\n\n  checks that a recorded run of the real system (JSON Lines) is a behaviour of the spec;\n  exit status 0 conforms, 20 does not conform (see: everystate conform -help)\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
+const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -simulate [num=N][,file=PREFIX]   random simulation: generate N behaviors instead of all states\n                      (without num=N it runs until an error is found; with -json the default is 1000)\n  -depth N            simulation: maximal length of a behavior (default 100)\n  -seed N, -aril N    simulation: seed of the random choices (the same seed repeats the run)\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, ...   accepted for compatibility\n\n       everystate conform [options] -trace TRACE SPEC[.tla]\n\n  checks that a recorded run of the real system (JSON Lines) is a behaviour of the spec;\n  exit status 0 conforms, 20 does not conform (see: everystate conform -help)\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
 
 struct Dump {
     file: String,
@@ -346,6 +360,7 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
     let mut config: Option<String> = None;
     let (mut deadlock, mut tool, mut json) = (true, false, false);
     let mut dump: Option<Dump> = None;
+    let mut sim = crate::simulate::SimArgs::default();
     let mut i = 0;
     while i < argv.len() {
         let a = argv[i].as_str();
@@ -369,9 +384,11 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
                 }
             }
             "-dumpTrace" | "-loadTrace" => i += 2,
-            "-simulate" | "-generate" => {
-                host.print("Error: simulation mode is not supported by everystate yet.\n");
-                return 1;
+            "-simulate" | "-generate" | "-depth" | "-seed" | "-aril" => {
+                if let Err(e) = sim.parse(argv, &mut i) {
+                    host.print(&format!("{}\n", e));
+                    return 1;
+                }
             }
             "-h" | "-help" | "--help" => {
                 host.print(USAGE);
@@ -414,7 +431,7 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
             cfg_path = in_dir;
         }
     }
-    let rep = Reporter { tool, host: host.clone() };
+    let rep = Reporter { tool, host: host.clone(), init_label: RefCell::new(None) };
     let t0 = host.now_ms();
     let parsed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
     let mut libs = vec![dir.clone()];
@@ -438,13 +455,17 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         }
         code
     };
+    let sim = sim.options(json, host.now_ms());
     if !json {
         rep.msg(2262, 0, &format!("TLC2 Version 2.19 of 08 August 2024 (everystate {})", VERSION));
-        rep.msg(
-            2187,
-            0,
-            &format!("Running breadth-first search Model-Checking with fp 0 and seed 0 with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (everystate {}, Rust, HashFPSet, MemStateQueue).", VERSION),
-        );
+        match &sim {
+            Some(o) => rep.msg(2188, 0, &format!("Running Random Simulation with seed {} with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (everystate {}, Rust).", o.seed, VERSION)),
+            None => rep.msg(
+                2187,
+                0,
+                &format!("Running breadth-first search Model-Checking with fp 0 and seed 0 with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (everystate {}, Rust, HashFPSet, MemStateQueue).", VERSION),
+            ),
+        }
     }
     let setup: R<Model> = (|| {
         if !host.exists(&cfg_path) {
@@ -499,6 +520,10 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
     };
     if !json {
         rep.msg(2185, 0, &format!("Starting... ({})", rep.now()));
+    }
+    if let Some(o) = &sim {
+        let code = crate::simulate::run_cli(&rep, &model, o, deadlock, json, t0);
+        return if json { code } else { finish(code) };
     }
     let mut events = CliEvents { rep: &rep, json, first: true };
     let (res, checker) = model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: dump.is_some() }, &mut events);
@@ -612,8 +637,12 @@ fn alias_text(model: &Model, cur: &StateRef, nxt: &StateRef) -> Result<Option<St
 
 fn print_trace(rep: &Reporter, model: &Model, res: &CheckResult) {
     if let Some(tr) = &res.trace {
+        let init_label = rep.init_label.borrow();
         for (i, t) in tr.iter().enumerate() {
-            let label = action_label(if i == 0 { None } else { t.action.map(|a| &model.actions[a]) });
+            let label = match (&*init_label, i) {
+                (Some(l), 0) => l.clone(),
+                _ => action_label(if i == 0 { None } else { t.action.map(|a| &model.actions[a]) }),
+            };
             // the successor used for primed variables in an ALIAS: the next trace state, the state the
             // lasso returns to, or the state itself
             let nxt = match tr.get(i + 1) {
@@ -649,7 +678,7 @@ fn exp1(p: f64) -> String {
     s.replace('e', "E")
 }
 
-fn report(rep: &Reporter, model: &Model, res: &CheckResult, t0: f64) {
+pub(crate) fn report(rep: &Reporter, model: &Model, res: &CheckResult, t0: f64) {
     let progress_line = || {
         let mins = ((rep.host.now_ms() - t0) / 60000.0).max(1e-6);
         rep.msg(
@@ -729,6 +758,9 @@ fn report(rep: &Reporter, model: &Model, res: &CheckResult, t0: f64) {
                     }
                 }
                 _ => rep.msg(2218, 4, &format!("{}: Stuttering", n + 1)),
+            }
+            if rep.init_label.borrow().is_some() {
+                return; // simulation prints its own statistics
             }
             rep.msg(2267, 0, &format!("Finished checking temporal properties in 00s at {}", rep.now()));
             if rep.tool {
