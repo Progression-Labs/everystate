@@ -18,6 +18,8 @@ pub struct Pred {
 pub struct Action {
     pub name: String,
     pub params: String,
+    /// The parameters of the action's definition and their values (same order as `params`).
+    pub param_vals: Vec<(String, Value)>,
     pub loc: Loc,
     pub module: String,
     pub e: N,
@@ -163,17 +165,19 @@ impl Builder {
         Ok(())
     }
 
-    fn param_str(&self, def: Option<&'static Def>, ctx: &C) -> String {
+    fn param_str(&self, def: Option<&'static Def>, ctx: &C) -> (String, Vec<(String, Value)>) {
         let def = match def {
             Some(d) if !d.params.is_empty() => d,
-            _ => return String::new(),
+            _ => return (String::new(), vec![]),
         };
         let mut vals = vec![];
+        let mut pairs = vec![];
         for p in &def.params {
-            let s = self.ev.lookup_value(ctx, p.name, None).and_then(|b| self.ev.unthunk(&b)).map(|v| fmt(&v)).unwrap_or_else(|_| "?".to_string());
-            vals.push(s);
+            let v = self.ev.lookup_value(ctx, p.name, None).and_then(|b| self.ev.unthunk(&b));
+            vals.push(v.as_ref().map(fmt).unwrap_or_else(|_| "?".to_string()));
+            pairs.push((p.name.to_string(), v.unwrap_or(Value::Undef)));
         }
-        format!("({})", vals.join(","))
+        (format!("({})", vals.join(",")), pairs)
     }
 
     fn split(&mut self, e: N, ctx: &C, nm: &str, def: Option<&'static Def>, module: &str) -> R<()> {
@@ -204,7 +208,7 @@ impl Builder {
                                 Err(x) => return Err(x),
                             }
                         }
-                        self.actions.push(Action { name: an.to_string(), params: String::new(), loc: e.loc, module: module.to_string(), e, ctx: ctx.clone() });
+                        self.actions.push(Action { name: an.to_string(), params: String::new(), param_vals: vec![], loc: e.loc, module: module.to_string(), e, ctx: ctx.clone() });
                         return Ok(());
                     }
                 }
@@ -239,8 +243,8 @@ impl Builder {
             }
             _ => {}
         }
-        let params = self.param_str(def, ctx);
-        self.actions.push(Action { name: nm.to_string(), params, loc: e.loc, module: module.to_string(), e, ctx: ctx.clone() });
+        let (params, param_vals) = self.param_str(def, ctx);
+        self.actions.push(Action { name: nm.to_string(), params, param_vals, loc: e.loc, module: module.to_string(), e, ctx: ctx.clone() });
         Ok(())
     }
 

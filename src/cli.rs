@@ -313,7 +313,7 @@ impl Events for CliEvents<'_> {
     }
 }
 
-const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
+const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\n       everystate conform [options] -trace TRACE SPEC[.tla]\n\n  checks that a recorded run of the real system (JSON Lines) is a behaviour of the spec;\n  exit status 0 conforms, 20 does not conform (see: everystate conform -help)\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
 
 struct Dump {
     file: String,
@@ -338,6 +338,10 @@ pub fn file_resolver(host: HostRef, dirs: Vec<String>, parsed: Rc<RefCell<Vec<St
 }
 
 pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 {
+    // `everystate conform ...`: trace conformance (a lone `conform` is still the spec conform.tla)
+    if argv.len() > 1 && argv[0] == "conform" {
+        return crate::conform::run_cli(&argv[1..], host, library_paths);
+    }
     let mut spec: Option<String> = None;
     let mut config: Option<String> = None;
     let (mut deadlock, mut tool, mut json) = (true, false, false);
