@@ -12,6 +12,9 @@
 //   --variants  also translate every file with each of a set of other option combinations
 //   --extra DIR more modules to compare (default test/pcal of this repository); a file Name.opts
 //               next to Name.tla holds the options for it, one set of options per line
+//   --validate  also compare what SANY says about changed algorithms and translations (the warning
+//               TLC prints when it loads a module) with `everystate pcal --check`, on the translated
+//               modules and on mutations of them
 //   --check N   also model-check up to N Examples specs before and after re-translating them with
 //               everystate, and compare the state counts
 // EVERYSTATE_CMD: the binary to test (default target/release/everystate)
@@ -191,6 +194,78 @@ for (const [name, s] of Object.entries(summary)) {
 }
 for (const [k, v] of Object.entries(categories)) console.log(`mismatch in ${k}: ${v.length}`);
 
+// ---- the warnings about changed algorithms and translations ----
+let validateFail = 0;
+if (args.includes('--validate')) {
+  // what a tool printed about module `name`: the translator's errors and the warning, if any
+  const digest = (out, name) => {
+    const errors = [...out.matchAll(/\nUnrecoverable error:\n -- [^]*?\.\n\n/g)].map(m => m[0].trim());
+    // the block of warnings ends where the semantic analysis (or the list of errors) begins
+    const start = out.indexOf('Warnings (');
+    const block = start < 0 ? '' : out.slice(start).split(/^(?:Semantic processing|Semantic errors|\*\*\* Errors|Fatal errors|Abort messages|Linting)/m)[0];
+    const w = new RegExp(`In module ${name}\\n\\n([^\\n]*)\\n`).exec(block);
+    return JSON.stringify({ errors: [...new Set(errors)], warning: w ? w[1] : null });
+  };
+  const mutations = {
+    same: t => t,
+    // white space and comments are not part of the algorithm
+    space: t => t.replace(/(--algorithm|--fair algorithm)([^\n]*)\n/, '$1$2  \n(* a comment *)\n'),
+    // a change of the algorithm (which may also make it unparsable)
+    algorithm: t => t.replace(/:=/, ':= 0 +'),
+    broken: t => t.replace(/:=/, ':= ('),
+    translation: t => t.replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1\n'),
+    both: t => t.replace(/:=/, ':= 0 +').replace(/(\\\* BEGIN TRANSLATION[^\n]*\n)/, '$1\n'),
+  };
+  const jobs = [];
+  for (const { c, j } of results) {
+    if (j.status !== 0 || j.tla == null || c.corpus.includes('variants')) continue;
+    for (const [mname, mutate] of Object.entries(mutations)) jobs.push({ c, mname, text: mutate(text(j.tla)) });
+  }
+  let n = 0, same = 0, skipped = 0;
+  const kinds = {};
+  async function vworker() {
+    while (n < jobs.length) {
+      const job = jobs[n++];
+      const base = path.basename(job.c.file);
+      const name = base.slice(0, -4);
+      const h = crypto.createHash('sha256').update(jarStamp).update('\0sany\0').update(base).update('\0').update(job.text).digest('hex');
+      const key = path.join(cacheDir, h + '.sany.json');
+      const dir = fs.mkdtempSync(path.join(scratch, 'sany-'));
+      // the other modules of the specification are needed for SANY to get as far as the warnings
+      for (const f of fs.readdirSync(path.dirname(job.c.file))) if (f.endsWith('.tla') && f !== base) fs.copyFileSync(path.join(path.dirname(job.c.file), f), path.join(dir, f));
+      fs.writeFileSync(path.join(dir, base), job.text);
+      let jout;
+      if (fs.existsSync(key)) jout = JSON.parse(fs.readFileSync(key, 'utf8'));
+      else {
+        jout = (await run('java', ['-cp', jar, 'tla2sany.SANY', base], dir, javaEnv)).stdout;
+        fs.writeFileSync(key, JSON.stringify(jout));
+      }
+      const eout = (await run(bin, ['pcal', '--check', base], dir, process.env)).stdout;
+      fs.rmSync(dir, { recursive: true, force: true });
+      const k = (kinds[job.mname] ??= { total: 0, same: 0, warned: 0, skipped: 0 });
+      // SANY prints the warnings only when it could load the module and everything it imports
+      if (/Could not parse module|Cannot find source file|Fatal errors while parsing/.test(jout)) {
+        k.skipped++;
+        skipped++;
+        continue;
+      }
+      const [dj, de] = [digest(jout, name), digest(eout, name)];
+      k.total++;
+      if (JSON.parse(dj).warning) k.warned++;
+      if (dj === de) {
+        same++;
+        k.same++;
+      } else {
+        validateFail++;
+        console.log(`VALIDATE FAIL ${job.c.id} (${job.mname}): SANY ${dj}, everystate ${de}`);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(8, os.cpus().length)) }, vworker));
+  for (const [k, v] of Object.entries(kinds)) console.log(`validate ${k}: ${v.same} of ${v.total} agree with SANY (${v.warned} with a warning; ${v.skipped} skipped because SANY cannot load the module)`);
+  console.log(`VALIDATE ${same} of ${jobs.length - skipped}`);
+}
+
 // ---- model-check a sample of the Examples before and after re-translation ----
 let checkFail = 0;
 if (checkN > 0) {
@@ -228,4 +303,4 @@ if (checkN > 0) {
 }
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(`PASS ${pass} of ${results.length}`);
-process.exit(pass === results.length && checkFail === 0 ? 0 : 1);
+process.exit(pass === results.length && checkFail === 0 && validateFail === 0 ? 0 : 1);

@@ -457,8 +457,15 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         }
         let m = build_model(&root_name, resolve, &cfg, host.clone());
         if !json {
-            for p in parsed.borrow().iter() {
+            // like SANY, say so when a PlusCal algorithm or its translation changed since it was translated
+            let pcal = crate::pcal::trans::check_translations(&host, &parsed.borrow(), &root_name);
+            for (i, p) in parsed.borrow().iter().enumerate() {
                 rep.plain(&format!("Parsing file {}", p));
+                host.print(&pcal.after_file[i]);
+            }
+            // (SANY gets as far as the warnings only if every module could be read and parsed)
+            if !matches!(&m, Err(e) if matches!(&**e, Fail::Tla(t) if t.kind == "parse" || t.msg.starts_with("Cannot find source file"))) {
+                host.print(&pcal.warnings);
             }
         }
         let m = m?;

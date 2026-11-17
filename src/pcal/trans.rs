@@ -789,9 +789,120 @@ pub fn validate(spec: &[String], messages: &mut Vec<String>) -> Divergence {
             }
         }
     }
-    // only the errors are of interest to the caller, not the progress messages
-    messages.extend(ctx.out.drain(..).filter(|m| m.starts_with("\nUnrecoverable error")));
+    // `Parsing completed.` is printed by the translator proper, not by the validator
+    messages.extend(ctx.out.drain(..).filter(|m| m != "Parsing completed."));
     res
+}
+
+/// What the model checker prints about the PlusCal algorithms of the modules it loaded.
+pub struct TranslationCheck {
+    /// For each file, the text to print after its `Parsing file` line (translator errors).
+    pub after_file: Vec<String>,
+    /// SANY's block of warnings about algorithms or translations that changed (may be empty).
+    pub warnings: String,
+}
+
+/// The module names after EXTENDS in the text of a module.
+fn extended_modules(text: &str) -> Vec<String> {
+    let mut names = vec![];
+    let mut rest = text;
+    while let Some(i) = rest.find("EXTENDS") {
+        let before_ok = !rest[..i].chars().next_back().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
+        rest = &rest[i + 7..];
+        if !before_ok || rest.chars().next().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+            continue;
+        }
+        loop {
+            let t = rest.trim_start();
+            let n = t.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(t.len());
+            if n == 0 {
+                break;
+            }
+            names.push(t[..n].to_string());
+            let t = t[n..].trim_start();
+            match t.strip_prefix(',') {
+                Some(t) => rest = t,
+                None => break,
+            }
+        }
+    }
+    names
+}
+
+/// The lines of the (first) module of a file: SANY validates only those, so the text before the
+/// module header is ignored and line numbers in messages count from the header.
+fn module_lines(lines: &[String]) -> &[String] {
+    let is_header = |l: &str| match l.find("----") {
+        Some(i) => l[i..].trim_start_matches('-').trim_start().starts_with("MODULE"),
+        None => false,
+    };
+    let begin = match lines.iter().position(|l| is_header(l)) {
+        Some(b) => b,
+        None => return lines,
+    };
+    let mut depth = 0;
+    for (i, l) in lines.iter().enumerate().skip(begin) {
+        if is_header(l) {
+            depth += 1;
+        } else if l.trim_start().starts_with("====") {
+            depth -= 1;
+            if depth == 0 {
+                return &lines[begin..=i];
+            }
+        }
+    }
+    &lines[begin..]
+}
+
+/// Does for the parsed files what SANY does when TLC loads a specification: the root module and
+/// every module that some module EXTENDS is checked with `validate`; a divergence between the
+/// checksums and the algorithm or its translation is reported as a warning (nothing is translated).
+pub fn check_translations(host: &HostRef, files: &[String], root: &str) -> TranslationCheck {
+    let texts: Vec<Option<String>> = files.iter().map(|f| host.read_file(f).ok().map(|b| String::from_utf8_lossy(&b).into_owned())).collect();
+    let mut extended: Vec<String> = vec![root.to_string()];
+    for t in texts.iter().flatten() {
+        if t.contains("EXTENDS") {
+            extended.extend(extended_modules(t));
+        }
+    }
+    let mut check = TranslationCheck { after_file: vec![String::new(); files.len()], warnings: String::new() };
+    let mut warnings: Vec<String> = vec![];
+    // the root module is validated first, then the others in the order they were parsed
+    let name_of = |f: &str| crate::cli::basename(f, ".tla").to_string();
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by_key(|i| name_of(&files[*i]) != root);
+    for i in order {
+        let name = name_of(&files[i]);
+        let text = match &texts[i] {
+            Some(t) if t.contains("algorithm") && extended.contains(&name) => t,
+            _ => continue,
+        };
+        let mut messages = vec![];
+        let d = validate(module_lines(&split_lines(text)), &mut messages);
+        for m in messages {
+            check.after_file[i] += &m;
+            check.after_file[i].push('\n');
+        }
+        let w = if d.pcal && d.tla {
+            format!("Both the PlusCal algorithm and its TLA+ translation in module {} have changed since the last translation.", name)
+        } else if d.tla {
+            format!("The TLA+ translation in module {} has changed since its last translation.", name)
+        } else if d.pcal {
+            format!("The PlusCal algorithm in module {} has changed since its last translation.", name)
+        } else if d.error {
+            format!("An unexpected problem was encountered attempting to validate the specification for {}", name)
+        } else {
+            continue;
+        };
+        let w = format!("In module {}\n\n{}\n\n\n\n", name, w);
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+    if !warnings.is_empty() {
+        check.warnings = format!("Warnings ({}) during syntax parsing of {}:\n\n\n{}", warnings.len(), root, warnings.concat());
+    }
+    check
 }
 
 // ---- entry points ----
@@ -832,6 +943,9 @@ fn join_lines(lines: &[String], eol: &str) -> Vec<u8> {
 /// `java pcal.trans args`: translates the file in place, writes `File.old` and updates `File.cfg`.
 /// Returns the exit status.
 pub fn run(args: &[String], host: HostRef) -> i32 {
+    if args.first().map(|a| a == "--check").unwrap_or(false) {
+        return run_check(&args[1..], &host);
+    }
     let mut ctx = Ctx::new();
     ctx.report_info(&format!("pcal.trans Version {} of {}", super::VERSION, super::MOD_DATE));
     let status = run_inner(&mut ctx, args, &host);
@@ -929,4 +1043,31 @@ fn run_inner(ctx: &mut Ctx, args: &[String], host: &HostRef) -> i32 {
     }
     ctx.report_info(&format!("New file {} written.", cfg_name));
     STATUS_EXIT_WITHOUT_ERROR
+}
+
+/// `everystate pcal --check File...` (not an option of the Java translator): reports, in the
+/// words of SANY, whether the algorithm or the translation of each module changed since it was
+/// translated, without translating anything.  Exit status 1 if one did.
+fn run_check(files: &[String], host: &HostRef) -> i32 {
+    if files.is_empty() {
+        host.print("usage: everystate pcal --check File[.tla] ...\n");
+        return 255;
+    }
+    let mut status = 0;
+    for f in files {
+        let path = if f.to_lowercase().ends_with(".tla") { f.clone() } else { format!("{}.tla", f) };
+        if !host.exists(&path) {
+            host.print(&format!("Input file {} not found\n", path));
+            status = 255;
+            continue;
+        }
+        let name = crate::cli::basename(&path, ".tla").to_string();
+        let check = check_translations(host, &[path], &name);
+        host.print(&check.after_file[0]);
+        host.print(&check.warnings);
+        if !check.warnings.is_empty() && status == 0 {
+            status = 1;
+        }
+    }
+    status
 }
