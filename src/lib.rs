@@ -14,6 +14,7 @@ pub mod liveness;
 pub mod model;
 pub mod modules;
 pub mod parser;
+pub mod pcal;
 pub mod pprint;
 pub mod stdlib;
 pub mod tshash;

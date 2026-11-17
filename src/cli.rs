@@ -338,6 +338,10 @@ pub fn file_resolver(host: HostRef, dirs: Vec<String>, parsed: Rc<RefCell<Vec<St
 }
 
 pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 {
+    if argv.first().map(|a| a == "pcal").unwrap_or(false) {
+        // `everystate pcal [options] File`: the PlusCal translator
+        return crate::pcal::trans::run(&argv[1..], host);
+    }
     let mut spec: Option<String> = None;
     let mut config: Option<String> = None;
     let (mut deadlock, mut tool, mut json) = (true, false, false);
@@ -943,6 +947,7 @@ pub fn run_java_shim(argv: &[String], host: HostRef) -> i32 {
         Some("tlc2.TLC") => run_cli(rest, host, &libs),
         Some("tla2sany.xml.XMLExporter") => run_xml_exporter(rest, host, &libs, false),
         Some("tla2sany.SANY") => run_xml_exporter(rest, host, &libs, true),
+        Some("pcal.trans") => crate::pcal::trans::run(rest, host),
         _ => {
             host.print(&format!("everystate java shim: unsupported main class {}\n", main.unwrap_or("(none)")));
             1
