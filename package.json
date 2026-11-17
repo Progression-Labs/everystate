@@ -1,6 +1,6 @@
 {
   "name": "everystate",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A TLA+ model checker with no Java dependency (TLC-compatible). Prebuilt native binaries, with a WebAssembly build for use from JavaScript.",
   "type": "module",
   "license": "MIT",
@@ -49,10 +49,10 @@
     "url": "git+https://github.com/mattzcarey/everystate.git"
   },
   "optionalDependencies": {
-    "everystate-linux-x64": "0.2.0",
-    "everystate-linux-arm64": "0.2.0",
-    "everystate-darwin-x64": "0.2.0",
-    "everystate-darwin-arm64": "0.2.0",
-    "everystate-win32-x64": "0.2.0"
+    "everystate-linux-x64": "0.3.0",
+    "everystate-linux-arm64": "0.3.0",
+    "everystate-darwin-x64": "0.3.0",
+    "everystate-darwin-arm64": "0.3.0",
+    "everystate-win32-x64": "0.3.0"
   }
 }
