@@ -8,8 +8,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { check as checkWasm } from '../wasm/everystate.mjs';
 
-const bin = path.resolve(import.meta.dirname, '../target/release/everystate' + (process.platform === 'win32' ? '.exe' : ''));
+const bin =path.resolve(import.meta.dirname, '../target/release/everystate' + (process.platform === 'win32' ? '.exe' : ''));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'everystate-simulate-'));
 process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -290,4 +291,15 @@ test('options: the java stand-in, file=, and the errors TLC gives for bad values
   bad(['-simulate', '-aril'], /^Error: An integer for aril required\. But encountered Bounded\n/);
   bad(['-simulate', 'file=x'], /^Error: You need to specify a 'num' argument when using the 'file' argument/);
   bad(['-generate'], /-generate .* is not supported/);
+});
+
+test('the WebAssembly build makes the same random choices as the native binary', () => {
+  const modules = { DieHard: fs.readFileSync(path.join(dir, 'DieHard.tla'), 'utf8') };
+  const config = fs.readFileSync(path.join(dir, 'DieHard.cfg'), 'utf8');
+  for (const seed of [1, 7, 123456789]) {
+    const native = simulate('DieHard', 'num=5000', '-depth', '40', '-seed', String(seed));
+    const wasm = checkWasm({ root: 'DieHard', modules, config, simulate: { traces: 5000, depth: 40, seed } }).result;
+    assert.deepEqual([wasm.status, wasm.traces, wasm.generated, wasm.depth], [native.status, native.traces, native.generated, native.depth]);
+    assert.deepEqual(wasm.trace!.map(t => t.action?.name ?? null), native.trace!.map(t => t.action));
+  }
 });
