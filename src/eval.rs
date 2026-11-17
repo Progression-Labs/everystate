@@ -362,6 +362,8 @@ fn captures_ctx(v: &Value) -> bool {
 /// Action composition (\cdot) is off by default, as in TLC; `-cdot` or the Java property
 /// `-Dtlc2.tool.impl.Tool.cdot=true` (Java shim) switches it on.
 pub static CDOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The number of workers of the run, as TLCGet("config").worker reports it.
+pub static WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 pub fn cdot_enabled() -> bool {
     CDOT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -2652,6 +2654,7 @@ impl Evaluator {
 
     pub fn random(&self) -> f64 {
         // xorshift64*; only used by RandomElement and the Randomization module
+        worker_impure("a random choice (RandomElement or the Randomization module)");
         let mut x = self.rng.get();
         x ^= x >> 12;
         x ^= x << 25;

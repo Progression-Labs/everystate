@@ -282,6 +282,11 @@ impl Events for CliEvents<'_> {
             &format!("Progress({}) at {}: {} states generated, {} distinct states found, {} states left on queue.", depth, rep.now(), commas(generated as f64), commas(distinct as f64), commas(queue as f64)),
         );
     }
+    fn note(&mut self, text: &str) {
+        if !self.json {
+            self.rep.plain(text);
+        }
+    }
     fn liveness(&mut self, phase: &str, branches: usize, depth: u32, generated: u64, distinct: u64) {
         if self.json {
             return;
@@ -313,7 +318,37 @@ impl Events for CliEvents<'_> {
     }
 }
 
-const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N, -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
+const USAGE: &str = concat!("everystate ", env!("CARGO_PKG_VERSION"), " - a TLA+ model checker (TLC-compatible command line)\n\nUsage: everystate [options] SPEC[.tla]\n\n  -config FILE        configuration file (default: SPEC.cfg)\n  -deadlock           do not check for deadlock\n  -tool               machine-readable output (TLC's -tool message framing)\n  -dump [dot[,actionlabels]] FILE   write the reachable state graph\n  -json               print a single JSON result object instead of TLC-style output\n  -workers N|auto     search with N threads (auto: one per core); the result is the same as with 1\n  -fp N, -lncheck S, -metadir DIR, -seed N, ...   accepted for compatibility\n\nExit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error, 151 config error.\n");
+
+/// The number of cores, which is what `-workers auto` means.
+fn cores() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::thread::available_parallelism().map_or(1, |n| n.get());
+    #[cfg(target_arch = "wasm32")]
+    1
+}
+
+/// `-workers N` with N > 1. EVERYSTATE_PAR_MIN (smallest level searched in parallel; setting it also
+/// starts the workers at once) and EVERYSTATE_PAR_CHUNK (states per unit of work) are test hooks.
+#[cfg(not(target_arch = "wasm32"))]
+fn par_config(workers: usize, root_name: &str, cfg_text: String, sources: Vec<(String, String)>) -> Option<ParConfig> {
+    if workers < 2 {
+        return None;
+    }
+    let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    let min = num("EVERYSTATE_PAR_MIN");
+    Some(ParConfig {
+        workers,
+        factory: crate::par::model_factory(root_name.to_string(), cfg_text, sources),
+        min_frontier: min.unwrap_or(64).max(1),
+        eager: min.is_some(),
+        chunk: num("EVERYSTATE_PAR_CHUNK").unwrap_or(0),
+    })
+}
+#[cfg(target_arch = "wasm32")]
+fn par_config(_: usize, _: &str, _: String, _: Vec<(String, String)>) -> Option<ParConfig> {
+    None
+}
 
 struct Dump {
     file: String,
@@ -342,10 +377,32 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
     let mut config: Option<String> = None;
     let (mut deadlock, mut tool, mut json) = (true, false, false);
     let mut dump: Option<Dump> = None;
+    let mut workers: usize = 1;
     let mut i = 0;
     while i < argv.len() {
         let a = argv[i].as_str();
         match a {
+            "-workers" => {
+                i += 1;
+                workers = match argv.get(i).map(|s| s.as_str()) {
+                    Some("auto") => cores(),
+                    Some(n) => match n.parse::<usize>() {
+                        Ok(n) if n >= 1 => n,
+                        Ok(_) => {
+                            host.print("Error: Error: at least one worker required.\n");
+                            return 1;
+                        }
+                        Err(_) => {
+                            host.print(&format!("Error: Error: worker number or 'auto' required. But encountered {}\n", n));
+                            return 1;
+                        }
+                    },
+                    None => {
+                        host.print("Error: Error: expect an integer or 'auto' for -workers option.\n");
+                        return 1;
+                    }
+                };
+            }
             "-config" => {
                 i += 1;
                 config = argv.get(i).cloned();
@@ -416,6 +473,23 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
     let mut libs = vec![dir.clone()];
     libs.extend(library_paths.iter().cloned());
     let resolve = file_resolver(host.clone(), libs, parsed.clone());
+    // -workers N: the worker threads build their own copy of the model from what is read here
+    let workers = if cfg!(target_arch = "wasm32") { 1 } else { workers };
+    crate::eval::WORKERS.store(workers, std::sync::atomic::Ordering::Relaxed);
+    let sources: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(vec![]));
+    let cfg_text: RefCell<String> = RefCell::new(String::new());
+    let resolve: SourceResolver = if workers > 1 {
+        let sources = sources.clone();
+        Box::new(move |name: &str| {
+            let text = resolve(name);
+            if let Some(t) = &text {
+                sources.borrow_mut().push((name.to_string(), t.clone()));
+            }
+            text
+        })
+    } else {
+        resolve
+    };
     let pad = |n: i64| format!("{:02}", n);
     let finish = |code: i32| -> i32 {
         let ms = (host.now_ms() - t0).max(0.0) as i64;
@@ -439,7 +513,11 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         rep.msg(
             2187,
             0,
-            &format!("Running breadth-first search Model-Checking with fp 0 and seed 0 with 1 worker on 1 cores with 0MB heap and 0MB offheap memory (everystate {}, Rust, HashFPSet, MemStateQueue).", VERSION),
+            &format!(
+                "Running breadth-first search Model-Checking with fp 0 and seed 0 with {} with 0MB heap and 0MB offheap memory (everystate {}, Rust, HashFPSet, MemStateQueue).",
+                if workers > 1 { format!("{} workers on {} cores", workers, cores()) } else { "1 worker on 1 cores".to_string() },
+                VERSION
+            ),
         );
     }
     let setup: R<Model> = (|| {
@@ -448,6 +526,7 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         }
         let text = String::from_utf8_lossy(&host.read_file(&cfg_path).unwrap_or_default()).into_owned();
         let cfg = parse_config(&text)?;
+        *cfg_text.borrow_mut() = text;
         if !json && tool {
             rep.msg(2220, 0, "Starting SANY...");
         }
@@ -497,7 +576,8 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         rep.msg(2185, 0, &format!("Starting... ({})", rep.now()));
     }
     let mut events = CliEvents { rep: &rep, json, first: true };
-    let (res, checker) = model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: dump.is_some() }, &mut events);
+    let par = par_config(workers, &root_name, cfg_text.take(), sources.take());
+    let (res, checker) = model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: dump.is_some(), par }, &mut events);
     let first = events.first;
     if let Some(d) = &dump {
         if let Err(e) = write_dump(&model, &checker, d, &host) {
