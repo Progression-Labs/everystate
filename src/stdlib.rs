@@ -883,6 +883,25 @@ fn tlc_get(ev: &Evaluator, k: &str) -> Option<Value> {
         "queue" => Value::Int(st.queue.get()),
         "diameter" => Value::Int(st.diameter.get()),
         "duration" => Value::Int(0),
+        "config" if st.sim.get().is_some() => {
+            let (depth, traces, seed, aril) = st.sim.get().unwrap();
+            make_record(
+                &ids(&["mode", "depth", "deadlock", "worker", "traces", "seed", "aril", "sched"]),
+                vec![mk_str("simulate"), Value::Int(depth), Value::Bool(st.check_deadlock.get()), Value::Int(1), Value::Int(traces), mk_str(&seed.to_string()), mk_str(&aril.to_string()), mk_str("random")],
+            )
+        }
+        "stats" if st.sim.get().is_some() => make_record(
+            &ids(&["traces", "duration", "generated", "behavior", "worker", "distinct", "retries"]),
+            vec![
+                Value::Int(st.traces.get()),
+                Value::Int(0),
+                Value::Int(st.generated.get()),
+                make_record(&ids(&["id"]), vec![Value::Int(st.traces.get())]),
+                Value::Int(0),
+                Value::Int(-1),
+                Value::Int(-1),
+            ],
+        ),
         "config" => make_record(
             &ids(&["mode", "depth", "deadlock", "worker", "traces", "seed", "fingerprint"]),
             vec![mk_str("bfs"), Value::Int(-1), Value::Bool(st.check_deadlock.get()), Value::Int(1), Value::Int(0), Value::Int(0), Value::Int(0)],

@@ -15,6 +15,7 @@ pub mod model;
 pub mod modules;
 pub mod parser;
 pub mod pprint;
+pub mod simulate;
 pub mod stdlib;
 pub mod tshash;
 pub mod value;

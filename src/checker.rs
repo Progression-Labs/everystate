@@ -460,7 +460,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Re-run a failing evaluation while recording the chain of nested expressions being evaluated.
-    fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
+    pub fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
         let ev = self.ev;
         ev.trace_stack.borrow_mut().clear();
         ev.tracing.set(true);
@@ -487,7 +487,7 @@ impl<'a> Checker<'a> {
         if lines.is_empty() { "    The error call stack is empty.\n".to_string() } else { lines.join("\n") + "\n" }
     }
 
-    fn check_assumptions(&self) -> Option<CheckResult> {
+    pub fn check_assumptions(&self) -> Option<CheckResult> {
         let ev = self.ev;
         for a in &self.model.root.assumes {
             if a.axiom {
@@ -556,14 +556,14 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn missing(&self, s: &StateData) -> Vec<String> {
+    pub fn missing(&self, s: &StateData) -> Vec<String> {
         let mut v: Vec<String> = self.model.vars.iter().enumerate().filter(|(j, _)| s.is_undef(*j)).map(|(_, d)| d.name.to_string()).collect();
         v.sort();
         v
     }
 
-    // Enumerate initial states.
-    fn compute_init(&mut self) -> Option<CheckResult> {
+    /// Every state satisfying the initial predicates, in enumeration order (duplicates included).
+    pub fn init_states(&self) -> Result<Vec<StateRef>, CheckResult> {
         let ev = self.ev;
         let m = self.model;
         let nv = self.nvars;
@@ -575,7 +575,7 @@ impl<'a> Checker<'a> {
         ev.n_assigned.set(0);
         let preds = &m.inits;
         if preds.is_empty() {
-            return None;
+            return Ok(found);
         }
         fn go(ck: &Checker, preds: &[Pred], i: usize, buf: &StateRef, found: &mut Vec<StateRef>) -> R<()> {
             if i == preds.len() {
@@ -602,7 +602,7 @@ impl<'a> Checker<'a> {
         let r = go(self, preds, 0, &buf, &mut found);
         ev.init_mode.set(false);
         if let Err(e) = r {
-            return Some(match *e {
+            return Err(match *e {
                 Fail::Check { status, message } => {
                     let mut r = self.result(status);
                     r.message = Some(message);
@@ -610,6 +610,19 @@ impl<'a> Checker<'a> {
                 }
                 ref other => self.error(self.describe_err(other, true), None),
             });
+        }
+        Ok(found)
+    }
+
+    // Enumerate initial states.
+    fn compute_init(&mut self) -> Option<CheckResult> {
+        let m = self.model;
+        let found = match self.init_states() {
+            Ok(f) => f,
+            Err(r) => return Some(r),
+        };
+        if m.inits.is_empty() {
+            return None;
         }
         self.set_level(1);
         for s in found {

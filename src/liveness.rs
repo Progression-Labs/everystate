@@ -1254,36 +1254,104 @@ pub fn model_check<'a>(model: &'a Model, opts: CheckOptions, events: &mut dyn Ev
         }
     }
     if result.status == "ok" {
-        let ev = model.ev;
-        for pc in &model.postconditions {
-            let at = format!("{} at {}", pc.pred.name, loc_str(&pc.loc, &pc.module));
-            ev.set_state(&StateData::blank(0), None);
-            ev.init_mode.set(false);
-            ev.prime_depth.set(0);
-            ev.call_depth.set(0);
-            match ev.eval(pc.pred.e, &pc.pred.ctx) {
-                Err(e) => {
-                    result = checker.error(format!("Evaluating postcondition {} failed.\n{}", at, describe(&e)), None);
-                    result.code = Some(2405);
-                    break;
-                }
-                Ok(Value::Bool(true)) => {}
-                Ok(_) => {
-                    if pc.possible {
-                        result = checker.error(
-                            format!("The _POSSIBLE predicate {} was never witnessed.\nOthers may be unwitnessed too; only witnessed predicates appear with a\nnon-zero count in the record printed above.\nSee https://explain.tlapl.us/possible-conditions for additional details.", at),
-                            None,
-                        );
-                        result.code = Some(2780);
-                    } else {
-                        result = checker.error(format!("Postcondition {} is false.", at), None);
-                        result.code = Some(2404);
-                    }
-                    break;
-                }
-            }
+        if let Some(r) = check_postconditions(model, &checker) {
+            result = r;
         }
     }
     result.live_branches = branches;
     (result, checker)
+}
+
+/// Evaluates the POSTCONDITIONs after a run without errors; returns the error result of the first
+/// one that does not hold.
+pub fn check_postconditions(model: &Model, checker: &Checker) -> Option<CheckResult> {
+    let ev = model.ev;
+    for pc in &model.postconditions {
+        let at = format!("{} at {}", pc.pred.name, loc_str(&pc.loc, &pc.module));
+        ev.set_state(&StateData::blank(0), None);
+        ev.init_mode.set(false);
+        ev.prime_depth.set(0);
+        ev.call_depth.set(0);
+        match ev.eval(pc.pred.e, &pc.pred.ctx) {
+            Err(e) => {
+                let mut result = checker.error(format!("Evaluating postcondition {} failed.\n{}", at, describe(&e)), None);
+                result.code = Some(2405);
+                return Some(result);
+            }
+            Ok(Value::Bool(true)) => {}
+            Ok(_) => {
+                let mut result;
+                if pc.possible {
+                    result = checker.error(
+                        format!("The _POSSIBLE predicate {} was never witnessed.\nOthers may be unwitnessed too; only witnessed predicates appear with a\nnon-zero count in the record printed above.\nSee https://explain.tlapl.us/possible-conditions for additional details.", at),
+                        None,
+                    );
+                    result.code = Some(2780);
+                } else {
+                    result = checker.error(format!("Postcondition {} is false.", at), None);
+                    result.code = Some(2404);
+                }
+                return Some(result);
+            }
+        }
+    }
+    None
+}
+
+/// The temporal formulas of a model, normalised once so that many small graphs (the behaviours of
+/// simulation mode) can be checked against them.
+pub struct PreparedLiveness {
+    atoms: Vec<Atom>,
+    atom_ids: HashMap<(usize, usize), usize>,
+    groups: Vec<Group>,
+    pub branches: usize,
+}
+
+impl PreparedLiveness {
+    /// `Ok(None)`: the model has no temporal properties. `Err`: the result to report.
+    pub fn new<'a>(model: &'a Model, checker: &Checker<'a>) -> Result<Option<PreparedLiveness>, CheckResult> {
+        if model.live_props.is_empty() {
+            return Ok(None);
+        }
+        let mut live = Liveness::new(model, checker);
+        let branches = match live.prepare() {
+            Err(e) => {
+                let mut r = checker.error(describe(&e), None);
+                r.print_summary = false;
+                return Err(r);
+            }
+            Ok(n) => n,
+        };
+        if branches == 0 && live.tautology {
+            let mut r = checker.error("Temporal formula is a tautology (its negation is unsatisfiable).".into(), None);
+            r.code = Some(2253);
+            r.print_summary = false;
+            return Err(r);
+        }
+        Ok(Some(PreparedLiveness { atoms: live.atoms, atom_ids: live.atom_ids, groups: live.groups.take().unwrap_or_default(), branches }))
+    }
+
+    /// Checks the graph recorded in `checker` (states, successors, initial states).
+    pub fn check<'a>(&mut self, model: &'a Model, checker: &Checker<'a>) -> R<Option<CheckResult>> {
+        if self.groups.is_empty() {
+            return Ok(None);
+        }
+        let mut live = Liveness::new(model, checker);
+        live.atoms = std::mem::take(&mut self.atoms);
+        live.atom_ids = std::mem::take(&mut self.atom_ids);
+        live.build_graph();
+        let mut found = Ok(None);
+        for g in &self.groups {
+            match live.check_group(&g.tf, &g.pems) {
+                Ok(None) => {}
+                r => {
+                    found = r;
+                    break;
+                }
+            }
+        }
+        self.atoms = live.atoms;
+        self.atom_ids = live.atom_ids;
+        found
+    }
 }
