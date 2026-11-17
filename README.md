@@ -140,8 +140,10 @@ npm run build      # native binary and wasm/everystate.wasm
 npm test           # WASM API, pretty-printer and community-module tests
 ```
 
-Releases: bump the version in `package.json` and `Cargo.toml` and push to `main`;
-`.github/workflows/release.yml` builds the binaries and publishes to npm (trusted publishing, no token).
+Releases use [changesets](.changeset/README.md): add one with `npx changeset` in your pull request,
+then merge the "Version Packages" pull request that appears. That bumps `package.json` and
+`Cargo.toml`, and `.github/workflows/release.yml` builds the binaries and publishes to npm and
+crates.io (trusted publishing, no tokens).
 
 An earlier pure-TypeScript engine is in the git history at commit `e8c67ce` (npm `everystate@0.1.0`).
 

@@ -1,0 +1,27 @@
+# Opens or updates the "Version Packages" pull request from the files in .changeset/.
+# Merging that pull request changes package.json on main, which starts the Release workflow.
+# Needs the repository setting "Allow GitHub Actions to create and approve pull requests".
+name: Version
+on:
+  push:
+    branches: [main]
+concurrency: version
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - uses: changesets/action@v1
+        with:
+          version: npm run version
+          title: Version Packages
+          commit: Version Packages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
