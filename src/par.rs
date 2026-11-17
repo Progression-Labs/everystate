@@ -227,9 +227,70 @@ fn ser_set(s: &SetV, out: &mut Vec<u8>) -> bool {
         SetK::Filter(_) => false,
     }
 }
+/// Appends one variable: the length of its encoding, then the encoding.
+fn ser_var(v: &Value, out: &mut Vec<u8>, tmp: &mut Vec<u8>) -> bool {
+    match v {
+        // scalars: one length byte, written in place
+        Value::Bool(_) | Value::Int(_) | Value::Str(_) | Value::Model(_) => {
+            let mark = out.len();
+            out.push(0);
+            ser_value(v, out);
+            out[mark] = (out.len() - mark - 1) as u8;
+            true
+        }
+        _ => {
+            tmp.clear();
+            if !ser_value(v, tmp) {
+                return false;
+            }
+            put_u(out, tmp.len() as u64);
+            out.extend_from_slice(tmp);
+            true
+        }
+    }
+}
 /// Appends the variables of a state; false when one of them cannot be serialized.
 fn ser_state(s: &StateRef, nvars: usize, out: &mut Vec<u8>) -> bool {
-    s.with(|vals| vals[..nvars].iter().all(|v| ser_value(v, out)))
+    let mut tmp = Vec::new();
+    s.with(|vals| vals[..nvars].iter().all(|v| ser_var(v, out, &mut tmp)))
+}
+/// The same value by identity: the variable was not touched between a state and its successor.
+#[inline]
+fn same_rc(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Tuple(x), Value::Tuple(y)) => Rc::ptr_eq(x, y),
+        (Value::Record(x), Value::Record(y)) => Rc::ptr_eq(x, y),
+        (Value::Fcn(x), Value::Fcn(y)) => Rc::ptr_eq(x, y),
+        (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+/// `ser_state` for a successor `t` of the state `s` whose encoding is `sb` (variable `i` at `spans[i]`):
+/// the variables that `t` shares with `s` are copied instead of encoded again.
+fn ser_successor(t: &StateRef, s: &StateRef, sb: &[u8], spans: &[(usize, usize)], out: &mut Vec<u8>, tmp: &mut Vec<u8>) -> bool {
+    t.with(|tv| {
+        s.with(|sv| {
+            for i in 0..spans.len() {
+                if same_rc(&tv[i], &sv[i]) {
+                    out.extend_from_slice(&sb[spans[i].0..spans[i].1]);
+                } else if !ser_var(&tv[i], out, tmp) {
+                    return false;
+                }
+            }
+            true
+        })
+    })
+}
+/// Where the variables are in the encoding of a state (each span includes the length prefix).
+fn var_spans(b: &[u8], nvars: usize, spans: &mut Vec<(usize, usize)>) {
+    spans.clear();
+    let mut pos = 0;
+    for _ in 0..nvars {
+        let start = pos;
+        let len = get_u(b, &mut pos) as usize;
+        pos += len;
+        spans.push((start, pos));
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -406,7 +467,12 @@ impl De {
     }
     pub fn state(&mut self, b: &[u8], nvars: usize) -> StateRef {
         let mut pos = 0;
-        let vals = self.values(b, &mut pos, nvars);
+        let mut vals = Vec::with_capacity(nvars);
+        for _ in 0..nvars {
+            // (a cache of whole variables by their encoding was tried here: it cost more than decoding)
+            let _len = get_u(b, &mut pos);
+            vals.push(self.value(b, &mut pos));
+        }
         debug_assert_eq!(pos, b.len());
         StateData::new(vals)
     }
@@ -562,6 +628,7 @@ fn worker_main(factory: Arc<dyn Fn() -> R<Model> + Send + Sync>, flags: Flags, r
     let mut de = De::default();
     let mut succs: Vec<StateRef> = vec![];
     let mut acts: Vec<u32> = vec![];
+    let mut scratch = Scratch::default();
     let nvars = model.vars.len();
     while let Ok(ToWorker::Level(job)) = rx.recv() {
         // fingerprints this worker has met in this level
@@ -580,9 +647,10 @@ fn worker_main(factory: Arc<dyn Fn() -> R<Model> + Send + Sync>, flags: Flags, r
                     if i > job.stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    let s = de.state(job.frontier.get(i), nvars);
+                    let sb = job.frontier.get(i);
+                    let s = de.state(sb, nvars);
                     let mark = (out.ent.len(), out.bytes.len());
-                    let mut event = if job.init { expand_init(&ck, &s, &mut local, &mut out) } else { expand(&ck, &s, job.lvl, &fps, &mut local, &mut out, &mut succs, &mut acts, flags, nvars) };
+                    let mut event = if job.init { expand_init(&ck, &s, &mut local, &mut out) } else { expand(&ck, &s, sb, job.lvl, &fps, &mut local, &mut out, &mut succs, &mut acts, flags, &mut scratch) };
                     // an order-dependent operator decides, whatever else happened to the evaluation
                     if let Some(what) = take_impure() {
                         event = Some(Event::Fallback(format!("the specification uses {}", what)));
@@ -615,7 +683,7 @@ fn worker_main(factory: Arc<dyn Fn() -> R<Model> + Send + Sync>, flags: Flags, r
 /// Expands one state as the sequential loop does (same evaluations in the same order, same TLCGet("level")),
 /// without its bookkeeping. Some(..) when the state has to go to the sequential search instead.
 #[allow(clippy::too_many_arguments)]
-fn expand(ck: &Checker, s: &StateRef, lvl: u32, fps: &FpSet, local: &mut FpSet, out: &mut ChunkOut, succs: &mut Vec<StateRef>, acts: &mut Vec<u32>, flags: Flags, nvars: usize) -> Option<Event> {
+fn expand(ck: &Checker, s: &StateRef, sb: &[u8], lvl: u32, fps: &FpSet, local: &mut FpSet, out: &mut ChunkOut, succs: &mut Vec<StateRef>, acts: &mut Vec<u32>, flags: Flags, scratch: &mut Scratch) -> Option<Event> {
     let m = ck.model;
     let ev = ck.ev;
     let level = &ev.stats.level;
@@ -627,6 +695,7 @@ fn expand(ck: &Checker, s: &StateRef, lvl: u32, fps: &FpSet, local: &mut FpSet, 
     }
     let extra = ev.extra_generated.replace(0);
     let first = out.ent.len();
+    var_spans(sb, ck.model.vars.len(), &mut scratch.spans);
     for i in 0..succs.len() {
         let t = &succs[i];
         let act = acts[i];
@@ -663,7 +732,7 @@ fn expand(ck: &Checker, s: &StateRef, lvl: u32, fps: &FpSet, local: &mut FpSet, 
             unseen = kind == CAND;
             if kind == CAND || flags.record {
                 let mark = out.bytes.len();
-                if (kind == CAND || flags.keep_states) && !ser_state(t, nvars, &mut out.bytes) {
+                if (kind == CAND || flags.keep_states) && !ser_successor(t, s, sb, &scratch.spans, &mut out.bytes, &mut scratch.tmp) {
                     return Some(Event::Fallback(UNSENDABLE.into()));
                 }
                 out.ent.push(Ent { fp: word, act, kind, len: (out.bytes.len() - mark) as u32 });
@@ -724,6 +793,12 @@ fn expand_init(ck: &Checker, s: &StateRef, local: &mut FpSet, out: &mut ChunkOut
     }
     out.src.push((1, (fp.is_some() && unseen) as u32));
     None
+}
+
+#[derive(Default)]
+struct Scratch {
+    spans: Vec<(usize, usize)>,
+    tmp: Vec<u8>,
 }
 
 struct Engine {
