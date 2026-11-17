@@ -140,8 +140,8 @@ npm run build      # native binary and wasm/everystate.wasm
 npm test           # WASM API, pretty-printer and community-module tests
 ```
 
-Releases: bump the version in `package.json` (and its `optionalDependencies`) and `Cargo.toml`,
-then push a tag `vX.Y.Z`; `.github/workflows/release.yml` builds the binaries and publishes to npm.
+Releases: bump the version in `package.json` and `Cargo.toml` and push to `main`;
+`.github/workflows/release.yml` builds the binaries and publishes to npm (trusted publishing, no token).
 
 An earlier pure-TypeScript engine is in the git history at commit `e8c67ce` (npm `everystate@0.1.0`).
 

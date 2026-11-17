@@ -1,20 +1,18 @@
 #!/usr/bin/env node
-// Launcher: runs the prebuilt native binary for this platform (installed as an optional dependency),
+// Launcher: runs the prebuilt native binary for this platform (shipped in ../native/<platform>-<arch>/),
 // or falls back to the WebAssembly build, which only prints a JSON result.
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
+import fs from 'node:fs';
 import path from 'node:path';
 
-const require = createRequire(import.meta.url);
 const exe = process.platform === 'win32' ? 'everystate.exe' : 'everystate';
 
 function nativeBinary() {
   if (process.env.EVERYSTATE_BINARY) return process.env.EVERYSTATE_BINARY;
-  try {
-    return require.resolve(`everystate-${process.platform}-${process.arch}/bin/${exe}`);
-  } catch {
-    return null;
-  }
+  const file = path.join(import.meta.dirname, '..', 'native', `${process.platform}-${process.arch}`, exe);
+  if (!fs.existsSync(file)) return null;
+  try { fs.accessSync(file, fs.constants.X_OK); } catch { try { fs.chmodSync(file, 0o755); } catch {} }
+  return file;
 }
 
 // `everystate-java ...` is `everystate java ...`: the stand-in for `java -cp tla2tools.jar tlc2.TLC`.
