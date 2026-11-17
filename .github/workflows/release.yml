@@ -1,14 +1,14 @@
-# Builds the native binaries and publishes the npm packages.
-# Run it by pushing a tag `vX.Y.Z` that matches the version in package.json, or from the Actions tab.
-# Publishing uses npm trusted publishing (OIDC): no token is stored. Each of the six packages must list
-# this repository and the workflow file release.yml as its trusted publisher on npmjs.com.
+# Builds the native binaries and publishes the npm package.
+# It runs when package.json or this file changes on main, on a tag `vX.Y.Z`, or from the Actions tab,
+# and publishes only when the version in package.json is not on npm yet.
+# Publishing uses npm trusted publishing (OIDC): no token is stored. The package lists this repository
+# and the workflow file release.yml as its trusted publisher on npmjs.com.
 name: Release
-# A push to main that changes this file only builds the binaries, as a check of the build matrix.
 on:
   push:
     tags: ['v*']
     branches: [main]
-    paths: ['.github/workflows/release.yml']
+    paths: ['.github/workflows/release.yml', 'package.json']
   workflow_dispatch:
 permissions:
   contents: write
@@ -51,7 +51,6 @@ jobs:
     permissions:
       contents: write
       id-token: write   # npm trusted publishing
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,31 +74,36 @@ jobs:
           cargo build --release
           sh wasm/build.sh
           npm test
-      - name: Publish the platform packages
+      - name: Put the binaries in native/<platform>-<arch>/
         run: |
-          version=$(node -p "require('./package.json').version")
           for dir in artifacts/everystate-*; do
-            name=$(basename "$dir")
-            pa=${name#everystate-}
-            exe=everystate
-            case "$pa" in win32-*) exe=everystate.exe ;; esac
-            if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name@$version already published"; continue; fi
-            node scripts/npm-platform.mjs "${pa%-*}" "${pa#*-}" "$dir/$exe" "pkg/$name"
-            (cd "pkg/$name" && npm publish --access public)
+            pa=$(basename "$dir"); pa=${pa#everystate-}
+            mkdir -p "native/$pa"
+            cp "$dir"/* "native/$pa/"
+            chmod 755 "native/$pa"/*
           done
+          ls -lR native
+          test "$(ls native | wc -l)" -eq 5
+          set +e
+          node bin/everystate.mjs examples/Counter.tla
+          test $? -eq 12
       - name: Publish everystate
+        id: publish
         run: |
           version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           if npm view "everystate@$version" version >/dev/null 2>&1; then echo "everystate@$version already published"; exit 0; fi
           npm publish --access public
+          echo "published=true" >> "$GITHUB_OUTPUT"
       - name: Attach the binaries to a GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.publish.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.publish.outputs.version }}
         run: |
           mkdir dist
           for dir in artifacts/everystate-*; do
             name=$(basename "$dir")
             (cd "$dir" && tar czf "../../dist/$name.tar.gz" *)
           done
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --generate-notes
