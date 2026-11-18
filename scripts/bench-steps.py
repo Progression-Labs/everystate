@@ -30,23 +30,38 @@ if "bench12" in sets:
     for cfg, spec in re.findall(r"\['(specifications/[^']+\.cfg)', '(specifications/[^']+\.tla)'", src):
         models.append(("bench12", os.path.basename(cfg)[:-4], EX, ["-json", "-config", cfg, spec]))
 
+# Every run is appended to FILE.jsonl as it finishes; a restarted benchmark continues from there.
 cells = {}
+done = set()
+log = (out + ".jsonl") if out else None
+def record(r):
+    c = cells.setdefault((r["set"], r["model"], r["bin"]), {"cpu": [], "rss": 0})
+    c["cpu"].append(r["cpu"]); c["rss"] = max(c["rss"], r["rss"])
+    c["distinct"] = r["distinct"]; c["generated"] = r["generated"]; c["status"] = r["status"]
+    done.add((r["round"], r["set"], r["model"], r["bin"]))
+if log and os.path.exists(log):
+    for line in open(log):
+        try: record(json.loads(line))
+        except Exception: pass
 for rnd in range(runs):
     for m in models:
         for b in bins:
+            if (rnd, m[0], m[1], os.path.basename(b)) in done:
+                continue
             p = subprocess.Popen([b] + m[3], cwd=m[2], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             o = p.stdout.read(); _, st, ru = os.wait4(p.pid, 0)
             try: j = json.loads(o.decode().strip().split("\n")[-1])
             except Exception: j = {}
-            c = cells.setdefault((m[0], m[1], b), {"cpu": [], "rss": 0})
-            c["cpu"].append(ru.ru_utime + ru.ru_stime); c["rss"] = max(c["rss"], ru.ru_maxrss // 1024)
-            c["distinct"] = j.get("distinct"); c["generated"] = j.get("generated"); c["status"] = j.get("status")
+            r = {"round": rnd, "set": m[0], "model": m[1], "bin": os.path.basename(b), "cpu": ru.ru_utime + ru.ru_stime, "rss": ru.ru_maxrss // 1024, "distinct": j.get("distinct"), "generated": j.get("generated"), "status": j.get("status"), "load": os.getloadavg()[0]}
+            record(r)
+            if log:
+                with open(log, "a") as f: f.write(json.dumps(r) + "\n")
     print(f"round {rnd + 1}/{runs} done, load {os.getloadavg()[0]:.1f}", file=sys.stderr, flush=True)
 rows = []
 for m in models:
     row = {"set": m[0], "model": m[1]}
     for b in bins:
-        c = cells[(m[0], m[1], b)]
+        c = cells[(m[0], m[1], os.path.basename(b))]
         row[os.path.basename(b)] = {"medianCpuS": round(statistics.median(c["cpu"]), 3), "minCpuS": round(min(c["cpu"]), 3), "rssMb": c["rss"], "distinct": c["distinct"], "generated": c["generated"], "status": c["status"]}
     rows.append(row)
     print(m[0].ljust(8), m[1].ljust(24), " ".join(f"{row[os.path.basename(b)]['medianCpuS']:7.2f}" for b in bins), row[os.path.basename(bins[0])]["distinct"], flush=True)
