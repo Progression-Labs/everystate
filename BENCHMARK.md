@@ -358,9 +358,10 @@ the speed-up from 1 to 4 workers stays at 3.0 to 3.1 times.
 
 ## A compiled evaluator, and a bounded step cache as an experiment (2026-11-18)
 
-Two switches, both off by default on this branch:
+Two switches. The compiled evaluator is the default from 0.4.0 (`EVERYSTATE_EVAL=tree` turns it off); the
+step cache is off by default. The measurements below were taken with each selected explicitly.
 
-- `EVERYSTATE_EVAL=compiled` (default `tree`): each top-level action and each invariant is turned, once
+- `EVERYSTATE_EVAL=compiled`: each top-level action and each invariant is turned, once
   before the search, into a tree of closures over a frame of slots (`src/compile.rs`). Identifiers are
   resolved to a state variable's index, a frame slot or a constant; definitions with value parameters are
   inlined, the parameters bound by name (an argument is evaluated where it is used, and kept for the rest

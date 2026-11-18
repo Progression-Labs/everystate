@@ -220,6 +220,11 @@ everystate [options] SPEC[.tla]
 Exit status: 0 success, 10 assumption, 11 deadlock, 12 safety, 13 liveness, 150 parse error,
 151 config error.
 
+Environment: `EVERYSTATE_EVAL=tree` evaluates with the tree-walking interpreter alone (the default
+compiles actions and invariants first and gives the same results). `EVERYSTATE_STEP_CACHE=on` turns
+on an experimental cache of local steps, a fixed-size table of `EVERYSTATE_STEP_CACHE_MB` megabytes
+per worker (default 32): faster on models made of many small independent steps, slower on some others.
+
 ## How it is checked
 
 Real TLC is the reference (details in [CONFORMANCE.md](CONFORMANCE.md)):

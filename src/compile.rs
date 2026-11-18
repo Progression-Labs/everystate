@@ -1,4 +1,4 @@
-//! A compiled form of actions and invariants (EVERYSTATE_EVAL=compiled); the tree-walker of eval.rs stays
+//! A compiled form of actions and invariants (the default; EVERYSTATE_EVAL=tree turns it off); the tree-walker of eval.rs stays
 //! the reference.
 //!
 //! Before the search each top-level action and each invariant is turned into a tree of closures:
@@ -2410,9 +2410,9 @@ fn cache_budget() -> usize {
     (mb.max(0.001) * 1024.0 * 1024.0) as usize
 }
 
-/// EVERYSTATE_EVAL=compiled
+/// The compiled evaluator is the default; EVERYSTATE_EVAL=tree selects the tree-walker alone.
 pub fn enabled() -> bool {
-    matches!(std::env::var("EVERYSTATE_EVAL").as_deref(), Ok("compiled")) || cache_enabled()
+    !matches!(std::env::var("EVERYSTATE_EVAL").as_deref(), Ok("tree")) || cache_enabled()
 }
 
 pub fn compile(model: &crate::model::Model) -> Plans {
