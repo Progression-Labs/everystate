@@ -6,6 +6,7 @@ pub mod cfg;
 pub mod checker;
 pub mod cli;
 pub mod community;
+pub mod conform;
 pub mod eval;
 pub mod host;
 pub mod intern;
@@ -16,7 +17,9 @@ pub mod modules;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod par;
 pub mod parser;
+pub mod pcal;
 pub mod pprint;
+pub mod simulate;
 pub mod stdlib;
 pub mod tshash;
 pub mod value;

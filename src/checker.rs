@@ -528,7 +528,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Re-run a failing evaluation while recording the chain of nested expressions being evaluated.
-    fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
+    pub fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
         let ev = self.ev;
         ev.trace_stack.borrow_mut().clear();
         ev.tracing.set(true);
@@ -555,7 +555,7 @@ impl<'a> Checker<'a> {
         if lines.is_empty() { "    The error call stack is empty.\n".to_string() } else { lines.join("\n") + "\n" }
     }
 
-    fn check_assumptions(&self) -> Option<CheckResult> {
+    pub fn check_assumptions(&self) -> Option<CheckResult> {
         let ev = self.ev;
         for a in &self.model.root.assumes {
             if a.axiom {
@@ -624,16 +624,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn missing(&self, s: &StateData) -> Vec<String> {
+    pub fn missing(&self, s: &StateData) -> Vec<String> {
         let mut v: Vec<String> = self.model.vars.iter().enumerate().filter(|(j, _)| s.is_undef(*j)).map(|(_, d)| d.name.to_string()).collect();
         v.sort();
         v
     }
 
-    // Enumerate initial states.
-    fn compute_init(&mut self, #[allow(unused_variables)] events: &mut dyn Events) -> Option<CheckResult> {
+    /// All states satisfying the initial predicate, in enumeration order (duplicates included).
+    pub fn enumerate_init(&self) -> R<Vec<StateRef>> {
         let ev = self.ev;
-        let m = self.model;
         let nv = self.nvars;
         let mut found: Vec<StateRef> = vec![];
         let buf = StateData::blank(nv);
@@ -641,10 +640,6 @@ impl<'a> Checker<'a> {
         ev.init_mode.set(true);
         ev.prime_depth.set(0);
         ev.n_assigned.set(0);
-        let preds = &m.inits;
-        if preds.is_empty() {
-            return None;
-        }
         fn go(ck: &Checker, preds: &[Pred], i: usize, buf: &StateRef, found: &mut Vec<StateRef>) -> R<()> {
             if i == preds.len() {
                 for k in 0..ck.nvars {
@@ -667,18 +662,45 @@ impl<'a> Checker<'a> {
             }
             ck.ev.enumerate(preds[i].e, &preds[i].ctx, &mut || go(ck, preds, i + 1, buf, found))
         }
-        let r = go(self, preds, 0, &buf, &mut found);
+        let r = go(self, &self.model.inits, 0, &buf, &mut found);
         ev.init_mode.set(false);
-        if let Err(e) = r {
-            return Some(match *e {
-                Fail::Check { status, message } => {
-                    let mut r = self.result(status);
-                    r.message = Some(message);
-                    r
-                }
-                ref other => self.error(self.describe_err(other, true), None),
-            });
+        r.map(|_| found)
+    }
+
+    /// As `enumerate_init`, with a failure already turned into a result; no initial predicate gives no states.
+    pub fn init_states(&self) -> Result<Vec<StateRef>, CheckResult> {
+        if self.model.inits.is_empty() {
+            return Ok(vec![]);
         }
+        self.enumerate_init().map_err(|e| match *e {
+            Fail::Check { status, message } => {
+                let mut r = self.result(status);
+                r.message = Some(message);
+                r
+            }
+            ref other => self.error(self.describe_err(other, true), None),
+        })
+    }
+
+    // Enumerate initial states.
+    fn compute_init(&mut self, #[allow(unused_variables)] events: &mut dyn Events) -> Option<CheckResult> {
+        let m = self.model;
+        if m.inits.is_empty() {
+            return None;
+        }
+        let found = match self.enumerate_init() {
+            Ok(f) => f,
+            Err(e) => {
+                return Some(match *e {
+                    Fail::Check { status, message } => {
+                        let mut r = self.result(status);
+                        r.message = Some(message);
+                        r
+                    }
+                    ref other => self.error(self.describe_err(other, true), None),
+                })
+            }
+        };
         self.set_level(1);
         // the workers may take the initial states up to one the sequential code has to look at
         #[cfg(not(target_arch = "wasm32"))]
@@ -768,7 +790,7 @@ impl<'a> Checker<'a> {
     }
 
     // Successors of one state, as (state, action index) pairs in action order.
-    pub(crate) fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
+    pub fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
         let ev = self.ev;
         let m = self.model;
         let n = self.nvars;

@@ -26,6 +26,9 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 
 - Safety and liveness checking, fairness, symmetry, `VIEW`, `ALIAS`.
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
+- Random simulation (`-simulate`) for models too large to enumerate, with seeded, reproducible runs.
+- Trace conformance (`everystate conform`): check a log of the real system against the spec.
+- A PlusCal translator (`everystate pcal`) with the Java translator's output, byte for byte.
 - The standard and community modules are built in.
 - One native binary, or WebAssembly for Node, Bun and workers.
 
@@ -33,6 +36,7 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 
 ```sh
 npm install -g everystate     # prebuilt binary for Linux, macOS and Windows
+brew install mattzcarey/tap/everystate
 cargo install everystate      # or build from source
 ```
 
@@ -115,11 +119,74 @@ result.name;     // 'NeverFour'
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
 
-### In place of Java TLC
+## Simulation
 
-`everystate java ...` (or `everystate-java ...` from npm) accepts the `java -cp tla2tools.jar tlc2.TLC ...` command line, so tools that
-shell out to TLC can point at it instead of a JVM. The pstack `statechart` script runs unmodified
-this way.
+When a model is too large to enumerate, `everystate -simulate num=10000 Spec.tla` generates random
+behaviours of up to `-depth` steps (default 100) and checks invariants, action properties, deadlock
+and temporal properties on each, printing TLC's simulation output. A pass means only that no
+generated behaviour violates a property. Without `num=` it runs until it finds an error, as TLC
+does; with `-json` it stops after 1000 behaviours. Every run prints its seed; pass it back with
+`-seed` to repeat the run exactly. From JavaScript:
+`check({ root, modules, config, simulate: { traces: 10000, seed: 1 } })`.
+
+Two differences from TLC: a deadlock is reported only for a state with no successor (TLC's
+simulator also reports one when a `CONSTRAINT` excludes every successor), and a state predicate
+given as `PROPERTY` is checked on the initial states (TLC's simulator skips it). Random choices
+differ from Java TLC's, so the same seed gives a different run there.
+
+## PlusCal
+
+`everystate pcal` translates the PlusCal algorithm in a module with the output of the Java
+translator (`pcal.trans` 1.12): the same TLA+, layout and checksums, the same `.old` backup and
+`.cfg` handling, the same options (`-wf`, `-sf`, `-wfNext`, `-nof`, `-termination`, `-label`,
+`-labelRoot`, `-lineWidth`, ... and the `PlusCal options (...)` line), in p-syntax and c-syntax.
+
+```tla
+---- MODULE Transfer ----
+EXTENDS Naturals, TLC
+
+(* --algorithm transfer
+variables alice = 10, bob = 10, money \in 1..20;
+begin
+  Withdraw: alice := alice - money;
+  Deposit:  bob := bob + money;
+  Check:    assert alice >= 0;
+end algorithm *)
+====
+```
+
+```sh
+everystate pcal Transfer.tla     # writes the translation into Transfer.tla, and Transfer.cfg
+everystate Transfer.tla          # "Failure of assertion at line 9, column 13."
+```
+
+When a module is model-checked and its algorithm or translation no longer matches the checksums
+in the `\* BEGIN TRANSLATION` line, everystate prints TLC's warning; `everystate pcal --check
+File.tla` reports the same without checking a model. From JavaScript,
+`translatePlusCal(source, options)` translates the text of a module. `-spec` and `-myspec` are not
+supported. `npm run conformance:pcal` compares the translator with the Java one.
+
+## Check the code against the model
+
+A pass verifies the model. To check that the running code behaves like it, log what the code does
+and ask whether that run is a behaviour of the spec:
+
+```sh
+everystate conform -trace run.jsonl Charge.tla
+```
+
+```
+{"state": {"sent": 0, "charges": 0}}
+{"action": "Send", "state": {"sent": 1}}
+{"action": "Handle", "state": {"charges": 2}}
+```
+
+Each line is a step: optionally the action, and whichever variables the code knows. The report
+names the first line the spec does not allow, what it expected, and which steps were possible
+there. Exit status 0 conforms, 20 does not (21 bad trace, 22 limit reached). `-hidden N` allows
+unlogged steps, `-stutter` snapshots, `-behavior` prints a full matching behaviour, `-json`
+structured output. From JavaScript: `conform({ root, modules, config, trace })`. Details are in
+the [skill](skills/formal-verification/SKILL.md).
 
 ## Agent skill
 
@@ -157,9 +224,8 @@ them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
-Simulation mode, multiple workers, disk-backed state storage (everything is in memory, so a few
-million distinct states is the practical limit), the PlusCal translator (already-translated specs
-work), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
+Multiple workers, disk-backed state storage (everything is in memory, so a few
+million distinct states is the practical limit), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
 are parsed and skipped).
 
 ## Development
