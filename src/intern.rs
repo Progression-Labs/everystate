@@ -1,8 +1,9 @@
 //! Two interners: `Name` for identifiers / operator names (arbitrary order), and `StrId` for TLA+
 //! strings and model values, whose ids reproduce TLC's "order of first interning" (see TLC_NOTES 1.1).
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Name(pub u32);
@@ -13,8 +14,6 @@ pub struct StrId(pub u32);
 struct Interner {
     map: HashMap<Rc<str>, u32>,
     items: Vec<Rc<str>>,
-    /// content hash of each item (strings only: see `str_hash`)
-    hashes: Vec<u64>,
 }
 impl Interner {
     fn get(&mut self, s: &str) -> u32 {
@@ -28,24 +27,121 @@ impl Interner {
         i
     }
 }
-/// 64-bit hash of the bytes of a string (FNV-1a, then a multiply-xorshift finalizer).
-fn content_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3);
+
+/// The process-wide string table: ids are positions in first-seen order and are the same in every
+/// thread, so that value order and fingerprints agree between parallel workers. Only the main thread
+/// adds strings; every thread keeps a cache in front of the table, so the lock is taken once per string
+/// and thread.
+#[derive(Default)]
+struct GlobalStrs {
+    map: HashMap<Arc<str>, u32>,
+    items: Vec<Arc<str>>,
+}
+static GLOBAL_STRS: Mutex<Option<GlobalStrs>> = Mutex::new(None);
+
+/// Ids from here on are private to one worker thread: a string that worker made and the table does not have.
+const PROVISIONAL: u32 = 0x4000_0000;
+
+#[derive(Default)]
+struct StrCache {
+    map: HashMap<Rc<str>, u32>,
+    items: Vec<Option<Rc<str>>>,
+    provisional: Vec<Rc<str>>,
+}
+impl StrCache {
+    #[cold]
+    fn slow_id(&mut self, s: &str) -> u32 {
+        let r: Rc<str> = Rc::from(s);
+        let i = {
+            let mut g = GLOBAL_STRS.lock().unwrap_or_else(|e| e.into_inner());
+            let g = g.get_or_insert_with(GlobalStrs::default);
+            match g.map.get(s) {
+                Some(&i) => i,
+                None if is_worker() => {
+                    // A worker must not decide the position of a new string in the global order: the
+                    // state being evaluated goes back to the sequential search, which interns the string
+                    // in its turn. Until then the worker computes with a private id.
+                    worker_impure("a string first created during the search");
+                    let i = PROVISIONAL + self.provisional.len() as u32;
+                    self.provisional.push(r.clone());
+                    self.map.insert(r, i);
+                    return i;
+                }
+                None => {
+                    let i = g.items.len() as u32;
+                    let a: Arc<str> = Arc::from(s);
+                    g.items.push(a.clone());
+                    g.map.insert(a, i);
+                    i
+                }
+            }
+        };
+        self.put(i, r.clone());
+        self.map.insert(r, i);
+        i
     }
-    h ^= h >> 32;
-    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    h ^= h >> 32;
-    h
+    fn put(&mut self, i: u32, r: Rc<str>) {
+        let i = i as usize;
+        if i >= self.items.len() {
+            self.items.resize(i + 1, None);
+        }
+        self.items[i] = Some(r);
+    }
+    #[cold]
+    fn slow_str(&mut self, i: u32) -> Rc<str> {
+        if i >= PROVISIONAL {
+            return self.provisional[(i - PROVISIONAL) as usize].clone();
+        }
+        let r: Rc<str> = {
+            let g = GLOBAL_STRS.lock().unwrap_or_else(|e| e.into_inner());
+            Rc::from(&*g.as_ref().expect("string table").items[i as usize])
+        };
+        self.put(i, r.clone());
+        self.map.insert(r.clone(), i);
+        r
+    }
 }
 
 thread_local! {
     static NAMES: RefCell<Interner> = RefCell::new(Interner::default());
-    static STRS: RefCell<Interner> = RefCell::new(Interner::default());
-    /// The `hashes` table of STRS (pointer, length), refreshed whenever a string is interned: fingerprinting
-    /// reads a string's content hash without borrowing the interner.
-    static STR_HASHES: std::cell::Cell<(*const u64, usize)> = const { std::cell::Cell::new((std::ptr::null(), 0)) };
+    static STRS: RefCell<StrCache> = RefCell::new(StrCache::default());
+    /// Set on the threads of parallel workers (see `worker_impure`).
+    static WORKER: Cell<bool> = const { Cell::new(false) };
+    static IMPURE: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Marks the current thread as a parallel worker.
+pub fn set_worker(on: bool) {
+    WORKER.with(|w| w.set(on));
+}
+#[inline]
+pub fn is_worker() -> bool {
+    WORKER.with(|w| w.get())
+}
+/// Called where evaluation has an effect, or reads something, that depends on the order in which the
+/// states are explored (printing, TLCSet / TLCGet registers, random choices, I/O, a new string). On a
+/// worker thread it records the reason and returns true: the caller must not perform the effect, and the
+/// state being expanded is handed back to the sequential search. Always false on the main thread.
+#[inline]
+pub fn worker_impure(what: &'static str) -> bool {
+    if !is_worker() {
+        return false;
+    }
+    IMPURE.with(|c| {
+        if c.get().is_none() {
+            c.set(Some(what));
+        }
+    });
+    true
+}
+/// The first reason recorded by `worker_impure` on this thread since the last call.
+pub fn take_impure() -> Option<&'static str> {
+    IMPURE.with(|c| c.take())
+}
+/// What a builtin returns on a worker thread instead of performing an order-dependent effect.
+#[cold]
+pub fn impure_err<T>() -> R<T> {
+    eval_err("this operator is evaluated by the sequential search only".to_string())
 }
 
 pub fn name(s: &str) -> Name {
@@ -58,28 +154,68 @@ pub fn name_str(n: Name) -> Rc<str> {
 pub fn str_id(s: &str) -> StrId {
     STRS.with(|n| {
         let mut n = n.borrow_mut();
-        let id = n.get(s);
-        if n.hashes.len() < n.items.len() {
-            let h = content_hash(s);
-            n.hashes.push(h);
-            let t = (n.hashes.as_ptr(), n.hashes.len());
-            STR_HASHES.with(|c| c.set(t));
+        if let Some(&i) = n.map.get(s) {
+            return StrId(i);
         }
-        StrId(id)
+        StrId(n.slow_id(s))
     })
 }
-/// Hash of the text of a string / model value: fingerprints depend on what a state contains, not on the
-/// order in which this thread happened to intern its strings.
+/// 64-bit hash of the bytes of a string (FNV-1a, then a multiply-xorshift finalizer); never 0.
+fn content_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    h | (h == 0) as u64
+}
+thread_local! {
+    /// Content hash of each string this thread has fingerprinted, by id (0: not computed yet), and the
+    /// table's (pointer, length) for `str_hash` to read without a borrow.
+    static STR_HASH_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static STR_HASHES: Cell<(*const u64, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+}
+/// Hash of the text of a string / model value. Fingerprints are built from it, so they depend on what a
+/// state contains and not on string ids: the same in every thread and for every order of interning.
 #[inline]
 pub fn str_hash(id: StrId) -> u64 {
     let (p, len) = STR_HASHES.with(|c| c.get());
-    assert!((id.0 as usize) < len);
-    // SAFETY: the table lives in this thread's interner, is only appended to, and the pointer is refreshed
-    // after every append; the index was just checked.
-    unsafe { *p.add(id.0 as usize) }
+    if (id.0 as usize) < len {
+        // SAFETY: the table belongs to this thread, and the pointer and length are refreshed whenever it
+        // is resized (`str_hash_slow`); the index was just checked.
+        let h = unsafe { *p.add(id.0 as usize) };
+        if h != 0 {
+            return h;
+        }
+    }
+    str_hash_slow(id)
+}
+#[cold]
+fn str_hash_slow(id: StrId) -> u64 {
+    let h = content_hash(&str_of(id));
+    if id.0 < PROVISIONAL {
+        STR_HASH_TABLE.with(|t| {
+            let mut t = t.borrow_mut();
+            let i = id.0 as usize;
+            if i >= t.len() {
+                t.resize((i + 1).next_power_of_two(), 0);
+            }
+            t[i] = h;
+            STR_HASHES.with(|c| c.set((t.as_ptr(), t.len())));
+        });
+    }
+    h
 }
 pub fn str_of(id: StrId) -> Rc<str> {
-    STRS.with(|t| t.borrow().items[id.0 as usize].clone())
+    STRS.with(|t| {
+        let mut t = t.borrow_mut();
+        if let Some(Some(r)) = t.items.get(id.0 as usize) {
+            return r.clone();
+        }
+        t.slow_str(id.0)
+    })
 }
 
 impl std::fmt::Display for Name {
@@ -107,7 +243,7 @@ pub fn model_value(name: &str) -> StrId {
     str_id(name)
 }
 pub fn model_type(id: StrId) -> Option<u8> {
-    if !any_typed() {
+    if !any_typed() || id.0 >= PROVISIONAL {
         return None;
     }
     MV_TYPES.with(|c| {

@@ -1209,7 +1209,7 @@ fn describe(e: &Fail) -> String {
 pub fn model_check<'a>(model: &'a Model, opts: CheckOptions, events: &mut dyn Events) -> (CheckResult, Checker<'a>) {
     let need_live = !model.live_props.is_empty();
     let record = opts.record_graph || need_live;
-    let mut checker = Checker::new(model, CheckOptions { check_deadlock: opts.check_deadlock, record_graph: record });
+    let mut checker = Checker::new(model, CheckOptions { check_deadlock: opts.check_deadlock, record_graph: record, par: opts.par });
     if need_live && (model.view.is_some() || model.symmetry.is_some()) {
         checker.succ_state = Some(vec![]);
     }

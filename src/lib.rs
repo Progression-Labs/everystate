@@ -14,7 +14,10 @@ pub mod lexer;
 pub mod liveness;
 pub mod model;
 pub mod modules;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod par;
 pub mod parser;
+pub mod pcal;
 pub mod pprint;
 pub mod simulate;
 pub mod stdlib;

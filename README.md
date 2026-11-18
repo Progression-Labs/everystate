@@ -28,6 +28,8 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
 - Random simulation (`-simulate`) for models too large to enumerate, with seeded, reproducible runs.
 - Trace conformance (`everystate conform`): check a log of the real system against the spec.
+- Parallel search (`-workers N`) with results identical to one worker.
+- A PlusCal translator (`everystate pcal`) with the Java translator's output, byte for byte.
 - The standard and community modules are built in.
 - One native binary, or WebAssembly for Node, Bun and workers.
 
@@ -118,6 +120,15 @@ result.name;     // 'NeverFour'
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
 
+## Multiple workers
+
+`-workers N` (or `-workers auto`, one per core) searches on N threads in the native binary. State
+counts, depth, verdict and the counterexample are the same as with one worker. Operators whose
+effect depends on exploration order (`Print`, `TLCSet`/`TLCGet` registers, `RandomElement`,
+IOUtils, ...) are evaluated by the sequential search; if they occur repeatedly the run continues
+with one worker and says so. Liveness checking, simulation and `conform` run on one thread, and
+the WebAssembly build is single-threaded.
+
 ## Simulation
 
 When a model is too large to enumerate, `everystate -simulate num=10000 Spec.tla` generates random
@@ -132,6 +143,38 @@ Two differences from TLC: a deadlock is reported only for a state with no succes
 simulator also reports one when a `CONSTRAINT` excludes every successor), and a state predicate
 given as `PROPERTY` is checked on the initial states (TLC's simulator skips it). Random choices
 differ from Java TLC's, so the same seed gives a different run there.
+
+## PlusCal
+
+`everystate pcal` translates the PlusCal algorithm in a module with the output of the Java
+translator (`pcal.trans` 1.12): the same TLA+, layout and checksums, the same `.old` backup and
+`.cfg` handling, the same options (`-wf`, `-sf`, `-wfNext`, `-nof`, `-termination`, `-label`,
+`-labelRoot`, `-lineWidth`, ... and the `PlusCal options (...)` line), in p-syntax and c-syntax.
+
+```tla
+---- MODULE Transfer ----
+EXTENDS Naturals, TLC
+
+(* --algorithm transfer
+variables alice = 10, bob = 10, money \in 1..20;
+begin
+  Withdraw: alice := alice - money;
+  Deposit:  bob := bob + money;
+  Check:    assert alice >= 0;
+end algorithm *)
+====
+```
+
+```sh
+everystate pcal Transfer.tla     # writes the translation into Transfer.tla, and Transfer.cfg
+everystate Transfer.tla          # "Failure of assertion at line 9, column 13."
+```
+
+When a module is model-checked and its algorithm or translation no longer matches the checksums
+in the `\* BEGIN TRANSLATION` line, everystate prints TLC's warning; `everystate pcal --check
+File.tla` reports the same without checking a model. From JavaScript,
+`translatePlusCal(source, options)` translates the text of a module. `-spec` and `-myspec` are not
+supported. `npm run conformance:pcal` compares the translator with the Java one.
 
 ## Check the code against the model
 
@@ -191,9 +234,8 @@ them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
-Multiple workers, disk-backed state storage (everything is in memory, so a few
-million distinct states is the practical limit), the PlusCal translator (already-translated specs
-work), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
+Disk-backed state storage (everything is in memory, so a few
+million distinct states is the practical limit), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
 are parsed and skipped).
 
 ## Development

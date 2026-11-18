@@ -1142,7 +1142,7 @@ pub fn check_trace(model: &Model, trace: &str, opts: &ConformOptions) -> Report 
         r.ignored = ignored;
         return r;
     }
-    let ck = Checker::new(model, CheckOptions { check_deadlock: false, record_graph: false });
+    let ck = Checker::new(model, CheckOptions { check_deadlock: false, record_graph: false, par: None });
     let mut eng = Engine { model, ck, opts: opts.clone(), obs, nodes: vec![], cut: 0, cut_name: None };
     let total = eng.obs.len();
     let mut rep = match run(&mut eng) {
@@ -1563,6 +1563,8 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
             "-behavior" | "-behaviour" => opts.behavior = true,
             "-noconstraints" => opts.constraints = false,
             "-json" => json = true,
+            // a trace is checked by one thread, whatever the number of workers asked for
+            "-workers" => i += 1,
             "-h" | "-help" | "--help" => {
                 host.print(USAGE);
                 return 0;

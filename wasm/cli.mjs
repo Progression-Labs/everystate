@@ -7,6 +7,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { check, conform } from './everystate.mjs';
 const argv = process.argv.slice(2);
+if (argv[0] === 'pcal') {
+  console.error('everystate: the pcal command needs the native binary; from JavaScript, translatePlusCal() of this package translates the text of a module.');
+  process.exit(1);
+}
 const conformMode = argv[0] === 'conform' && argv.length > 1;
 if (conformMode) argv.shift();
 const opts = {};

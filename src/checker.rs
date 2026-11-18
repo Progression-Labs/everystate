@@ -49,6 +49,8 @@ pub trait Events {
     fn progress(&mut self, _depth: u32, _generated: u64, _distinct: u64, _queue: u64) {}
     /// phase: "branches" | "start" | "end"
     fn liveness(&mut self, _phase: &str, _branches: usize, _depth: u32, _generated: u64, _distinct: u64) {}
+    /// A remark about the run itself (the parallel search going back to one worker).
+    fn note(&mut self, _text: &str) {}
 }
 pub struct NoEvents;
 impl Events for NoEvents {}
@@ -56,6 +58,23 @@ impl Events for NoEvents {}
 pub struct CheckOptions {
     pub check_deadlock: bool,
     pub record_graph: bool,
+    /// parallel breadth-first search (`-workers N`, N > 1); None = one worker
+    pub par: Option<ParConfig>,
+}
+
+/// How to run the search on several threads. Every worker thread builds its own copy of the model
+/// (`factory`), because the evaluator, the syntax tree and all values are single-threaded.
+#[derive(Clone)]
+pub struct ParConfig {
+    pub workers: usize,
+    pub factory: std::sync::Arc<dyn Fn() -> R<Model> + Send + Sync>,
+    /// a level is searched in parallel when it has at least this many states
+    pub min_frontier: usize,
+    /// ... and, unless `eager`, the search has been running for a moment (starting the workers costs
+    /// about as much as checking a small model)
+    pub eager: bool,
+    /// states per unit of work handed to a worker; 0 = chosen per level
+    pub chunk: usize,
 }
 
 /// Open-addressing hash set of 64-bit fingerprints mapping to state ids.
@@ -67,8 +86,30 @@ pub struct FpSet {
 }
 impl FpSet {
     pub fn new() -> FpSet {
-        let cap = 1 << 16;
+        FpSet::with_capacity(1 << 16)
+    }
+    /// `cap` must be a power of two.
+    pub fn with_capacity(cap: usize) -> FpSet {
         FpSet { keys: vec![0; cap], ids: vec![0; cap], size: 0, mask: cap - 1 }
+    }
+    pub fn len(&self) -> usize {
+        self.size
+    }
+    /// The id stored for `fp`, without inserting.
+    #[inline]
+    pub fn get(&self, fp: u64) -> Option<u32> {
+        let fp = if fp == 0 { 0x9E37_79B9_7F4A_7C15 } else { fp };
+        let mut i = (fp as usize) & self.mask;
+        loop {
+            let k = self.keys[i];
+            if k == 0 {
+                return None;
+            }
+            if k == fp {
+                return Some(self.ids[i]);
+            }
+            i = (i + 1) & self.mask;
+        }
     }
     /// Returns the existing id, or None after inserting `id`.
     #[inline]
@@ -171,6 +212,13 @@ fn same_value(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// The fingerprint terms of the variables of a state whose successors are being fingerprinted.
+#[derive(Default)]
+pub(crate) struct ParentTerms {
+    term: Vec<u64>,
+    sum: u64,
+}
+
 /// Applies a model-value permutation; None when the value is unchanged.
 /// `m` is a dense table indexed by string id (identity where the entry equals the index or is missing).
 pub fn permute(v: &Value, m: &[u32]) -> R<Option<Value>> {
@@ -228,7 +276,7 @@ pub struct Checker<'a> {
     /// actual successor states per edge (only with VIEW/SYMMETRY + liveness)
     pub succ_state: Option<Vec<Vec<StateRef>>>,
     pub inits: Vec<u32>,
-    fps: FpSet,
+    pub(crate) fps: FpSet,
     pub generated: u64,
     pub init_generated: u64,
     pub init_distinct: u64,
@@ -239,9 +287,19 @@ pub struct Checker<'a> {
     perms: Vec<Vec<u32>>,
     /// memo of `permute` for compound values: (value hash, permutation index) -> (value, its image)
     perm_memo: std::cell::RefCell<std::collections::HashMap<(u64, u32), (Value, Option<Value>)>>,
-    outdeg: Vec<u32>,
-    cur_level: u32,
-    empty: StateRef,
+    pub(crate) outdeg: Vec<u32>,
+    pub(crate) cur_level: u32,
+    /// Also the placeholder in `states` for a state that the parallel search holds in serialized form
+    /// only (see `state_at`).
+    pub(crate) empty: StateRef,
+    /// Index of the first state of the next level while the search may still go parallel; usize::MAX otherwise.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) level_end: usize,
+    pub(crate) last_progress: f64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) t_start: f64,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) par: Option<Box<crate::par::Par>>,
     /// Successors are kept as rows of a reusable buffer and a state is allocated only when its fingerprint
     /// is new. Possible when nothing but the fingerprint set looks at a generated state: no CONSTRAINT,
     /// ACTION_CONSTRAINT, VIEW, SYMMETRY, action property or recorded graph. EVERYSTATE_ENGINE=classic
@@ -340,10 +398,27 @@ impl<'a> Checker<'a> {
                 && model.implied_actions.is_empty()
                 && model.view.is_none()
                 && model.symmetry.is_none(),
+            level_end: usize::MAX,
+            last_progress: 0.0,
+            t_start: 0.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            par: None,
         }
     }
 
-    fn sync_stats(&self) {
+    /// State `i`. The states found by the parallel search are kept serialized and rebuilt on demand.
+    pub fn state_at(&self, i: usize) -> StateRef {
+        let s = &self.states[i];
+        #[cfg(not(target_arch = "wasm32"))]
+        if Rc::ptr_eq(s, &self.empty) {
+            if let Some(p) = &self.par {
+                return p.load(i, self.nvars);
+            }
+        }
+        s.clone()
+    }
+
+    pub(crate) fn sync_stats(&self) {
         let st = &self.ev.stats;
         st.level.set(self.cur_level as i64);
         st.distinct.set(self.states.len() as i64);
@@ -351,7 +426,7 @@ impl<'a> Checker<'a> {
         st.queue.set(self.states.len() as i64 - self.head as i64);
         st.diameter.set(self.depth as i64);
     }
-    fn set_level(&mut self, l: u32) {
+    pub(crate) fn set_level(&mut self, l: u32) {
         self.cur_level = l;
         self.ev.stats.level.set(l as i64);
     }
@@ -454,6 +529,40 @@ impl<'a> Checker<'a> {
         Ok(fp_finish(sum))
     }
 
+    /// Successors can be kept as rows and looked up before a state is built for them (see `flat`).
+    pub(crate) fn is_flat(&self) -> bool {
+        self.flat
+    }
+    /// The terms of `s`, for `row_fingerprint`. (The state was fingerprinted when it was found: the words
+    /// of its values are cached.)
+    pub(crate) fn parent_terms(&self, s: &StateRef, pt: &mut ParentTerms) -> R<()> {
+        let nv = self.nvars;
+        pt.term.resize(nv, 0);
+        pt.sum = 0;
+        s.with(|pv| {
+            for k in 0..nv {
+                pt.term[k] = var_term(k, value_word(&pv[k])?);
+                pt.sum = pt.sum.wrapping_add(pt.term[k]);
+            }
+            Ok(())
+        })
+    }
+    /// The fingerprint of a successor of `s` given as a row of variables (no VIEW, no SYMMETRY): the
+    /// fingerprint of `s` with the terms of the changed variables replaced. Equal to `fingerprint` of the
+    /// state with these variables.
+    #[inline]
+    pub(crate) fn row_fingerprint(&self, s: &StateRef, pt: &ParentTerms, row: &[Value]) -> R<u64> {
+        s.with(|pv| {
+            let mut sum = pt.sum;
+            for k in 0..self.nvars {
+                if !same_value(&row[k], &pv[k]) {
+                    sum = sum.wrapping_sub(pt.term[k]).wrapping_add(var_term(k, value_word(&row[k])?));
+                }
+            }
+            Ok(fp_finish(sum))
+        })
+    }
+
     pub fn result(&self, status: &'static str) -> CheckResult {
         CheckResult {
             status,
@@ -499,7 +608,7 @@ impl<'a> Checker<'a> {
         let mut i = id as u32;
         loop {
             let a = self.act[i as usize];
-            out.push(TraceStep { state: self.states[i as usize].clone(), action: if a >= 0 { Some(a as usize) } else { None }, id: i as i64 });
+            out.push(TraceStep { state: self.state_at(i as usize), action: if a >= 0 { Some(a as usize) } else { None }, id: i as i64 });
             i = self.parent[i as usize];
             if i == NO_PARENT {
                 break;
@@ -683,7 +792,7 @@ impl<'a> Checker<'a> {
     }
 
     // Enumerate initial states.
-    fn compute_init(&mut self) -> Option<CheckResult> {
+    fn compute_init(&mut self, #[allow(unused_variables)] events: &mut dyn Events) -> Option<CheckResult> {
         let m = self.model;
         if m.inits.is_empty() {
             return None;
@@ -702,6 +811,13 @@ impl<'a> Checker<'a> {
             }
         };
         self.set_level(1);
+        // the workers may take the initial states up to one the sequential code has to look at
+        #[cfg(not(target_arch = "wasm32"))]
+        let found = {
+            let done = crate::par::init(self, &found, events);
+            self.sync_stats();
+            found.into_iter().skip(done)
+        };
         for s in found {
             self.generated += 1;
             self.init_generated += 1;
@@ -792,7 +908,7 @@ impl<'a> Checker<'a> {
     }
     /// As `successors`, without allocating a state per successor: the variables of each successor are
     /// appended to `out` (`nvars` values per successor).
-    fn successors_flat(&self, s: &StateRef, out: &mut Vec<Value>, out_act: &mut Vec<u32>) -> R<()> {
+    pub(crate) fn successors_flat(&self, s: &StateRef, out: &mut Vec<Value>, out_act: &mut Vec<u32>) -> R<()> {
         let n = self.nvars;
         self.successors_with(s, &mut |nxt, ai| {
             nxt.with(|v| out.extend_from_slice(&v[..n]));
@@ -847,6 +963,8 @@ impl<'a> Checker<'a> {
 
     pub fn run(&mut self, events: &mut dyn Events) -> CheckResult {
         let r = self.search(events);
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::par::finish(self);
         if self.ev.steps.enabled.get() {
             let m = self.model;
             let report = self.ev.steps.report(&|ai| format!("{}{}", m.actions[ai].name, m.actions[ai].params));
@@ -854,12 +972,16 @@ impl<'a> Checker<'a> {
         }
         r
     }
+
     fn search(&mut self, events: &mut dyn Events) -> CheckResult {
         let m = self.model;
+        self.t_start = self.ev.host.borrow().now_ms();
         if let Some(r) = self.check_assumptions() {
             return r;
         }
-        if let Some(r) = self.compute_init() {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::par::prepare(self);
+        if let Some(r) = self.compute_init(events) {
             return r;
         }
         events.init_done(self.init_generated, self.init_distinct);
@@ -870,10 +992,10 @@ impl<'a> Checker<'a> {
         // flat mode: the variables of all successors of the current state, and the fingerprint terms of
         // the current state's variables
         let mut rows: Vec<Value> = vec![];
-        let mut pterm: Vec<u64> = vec![0; nv];
+        let mut pterms = ParentTerms::default();
         let record = self.opts.record_graph;
         let ev = self.ev;
-        let mut last_progress = ev.host.borrow().now_ms();
+        self.last_progress = ev.host.borrow().now_ms();
         if m.inits.is_empty() {
             return self.result("ok");
         }
@@ -885,6 +1007,14 @@ impl<'a> Checker<'a> {
         }
         while self.head < self.states.len() && !ev.stats.stop_requested.get() {
             let sid = self.head;
+            #[cfg(not(target_arch = "wasm32"))]
+            if sid == self.level_end {
+                // a level starts here: it is searched by the workers when that pays
+                self.level_end = self.states.len();
+                if crate::par::level(self, events) {
+                    continue;
+                }
+            }
             self.head += 1;
             let s = self.states[sid].clone();
             let lvl = self.level[sid];
@@ -909,17 +1039,8 @@ impl<'a> Checker<'a> {
             let extra = ev.extra_generated.replace(0);
             self.generated += extra;
             let mut fresh = 0u32;
-            let mut psum = 0u64;
             if flat && !succ_act.is_empty() {
-                // the state was fingerprinted when it was found: the words of its values are cached
-                let terms: R<()> = s.with(|pv| {
-                    for k in 0..nv {
-                        pterm[k] = var_term(k, value_word(&pv[k])?);
-                        psum = psum.wrapping_add(pterm[k]);
-                    }
-                    Ok(())
-                });
-                if let Err(e) = terms {
+                if let Err(e) = self.parent_terms(&s, &mut pterms) {
                     return self.error(self.describe_err(&e, true), Some(self.trace_to(sid)));
                 }
             }
@@ -930,17 +1051,7 @@ impl<'a> Checker<'a> {
                 let mut known_fp: Option<u64> = None;
                 let t = if flat {
                     let row = &rows[i * nv..(i + 1) * nv];
-                    // the parent's fingerprint with the terms of the changed variables replaced
-                    let fp: R<u64> = s.with(|pv| {
-                        let mut sum = psum;
-                        for k in 0..nv {
-                            if !same_value(&row[k], &pv[k]) {
-                                sum = sum.wrapping_sub(pterm[k]).wrapping_add(var_term(k, value_word(&row[k])?));
-                            }
-                        }
-                        Ok(fp_finish(sum))
-                    });
-                    match fp {
+                    match self.row_fingerprint(&s, &pterms, row) {
                         // seen before: nothing else looks at this successor, so no state is built for it
                         Ok(fp) if self.fps.contains(fp) => continue,
                         Ok(fp) => known_fp = Some(fp),
@@ -1071,8 +1182,8 @@ impl<'a> Checker<'a> {
             }
             if sid & 1023 == 0 {
                 let now = ev.host.borrow().now_ms();
-                if now - last_progress > 60000.0 {
-                    last_progress = now;
+                if now - self.last_progress > 60000.0 {
+                    self.last_progress = now;
                     events.progress(self.depth, self.generated, self.states.len() as u64, (self.states.len() - self.head) as u64);
                 }
             }

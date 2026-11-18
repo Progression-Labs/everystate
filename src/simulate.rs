@@ -461,7 +461,7 @@ impl<'a, 'o> Sim<'a, 'o> {
 /// Generates random behaviours of `model` and checks them.
 pub fn simulate(model: &Model, opts: &SimOptions, events: &mut dyn SimEvents) -> SimOutcome {
     let ev = model.ev;
-    let ck = Checker::new(model, CheckOptions { check_deadlock: opts.check_deadlock, record_graph: true });
+    let ck = Checker::new(model, CheckOptions { check_deadlock: opts.check_deadlock, record_graph: true, par: None });
     let mut rng = Rng::new(opts.seed, opts.aril);
     // RandomElement and the Randomization module follow the seed too
     ev.rng.set(rng.next() | 1);
