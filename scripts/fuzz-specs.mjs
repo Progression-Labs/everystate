@@ -97,7 +97,9 @@ function actorSpec(r, name) {
     `        \\/ \\E m \\in ${dom} : Deliver(m) \\/ Lose(m)${dup ? ' \\/ Dup(m)' : ''}`);
   const invs = ['\\A x \\in Reps : st[x] < K', `\\A x \\in Reps : Cardinality(seen[x]) <= ${1 + r.int(2)}`, `Len(log) < ${1 + r.int(2)}`,
     `net # ${empty} \\/ \\A x, y \\in Reps : st[x] = st[y]`, `faults < ${1 + r.int(3)}`, `\\A x \\in Reps : st[x] # ${r.int(K)}`,
-    `Sum(UNION {seen[x] : x \\in Reps}) < ${K + 2}`, '\\A x \\in Reps : seen[x] \\subseteq 0..K', '{x \\in Reps : st[x] > 0} # Reps', '[x \\in Reps |-> st[x]] = st'];
+    `Sum(UNION {seen[x] : x \\in Reps}) < ${K + 2}`, '\\A x \\in Reps : seen[x] \\subseteq 0..K', '{x \\in Reps : st[x] > 0} # Reps', '[x \\in Reps |-> st[x]] = st',
+    // several bounds, tuple patterns
+    '\\A <<a, b>> \\in Reps \\X Reps : a = b \\/ st[a] + st[b] < 2 * K - 1', '\\E x \\in Reps, v \\in 0..K : st[x] = v /\\ Cardinality({<<y, w>> \\in Reps \\X {v} : st[y] = w}) >= 1'];
   lines.push(`Inv == ${r.pick(invs)}`, 'Bound == faults <= 1', 'View == <<st, net, sent, faults>>',
     'Step == [][faults\' >= faults]_vars', '====');
   const cfg = ['CONSTANTS', `  K = ${K}`, `  Faults = ${faults}`, `  Sends = ${sends}`, 'INIT Init', 'NEXT Next'];
