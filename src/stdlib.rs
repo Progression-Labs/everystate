@@ -373,6 +373,69 @@ fn bag_merge(d0: &[Value], v0: &[Value], d1: &[Value], v1: &[Value], plus: bool)
     }
     Some(make_fcn_owned(dom, vals))
 }
+/// `b (+) SetToBag({e})` (plus) or `b (-) SetToBag({e})` for a proper bag `b`; None for the general code
+/// to decide (not a bag of positive counts, a failing comparison, an overflow).
+pub(crate) fn bag_one(b: &Value, e: &Value, plus: bool) -> Option<Value> {
+    if !is_fcn(b) {
+        return None;
+    }
+    let d0 = domain_elems(b).ok()?;
+    let v0 = fcn_values(b).ok()?;
+    if !v0.iter().all(|v| matches!(v, Value::Int(n) if *n > 0)) {
+        return None;
+    }
+    let (mut lo, mut hi) = (0, d0.len());
+    let mut found = false;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let c = match scalar_cmp(&d0[mid], e) {
+            Some(c) => c,
+            None => compare(&d0[mid], e).ok()?,
+        };
+        match c {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => {
+                lo = mid;
+                found = true;
+                break;
+            }
+        }
+    }
+    if !found {
+        if !plus {
+            return Some(b.clone());
+        }
+        let mut dom = Vec::with_capacity(d0.len() + 1);
+        let mut vals = Vec::with_capacity(d0.len() + 1);
+        dom.extend_from_slice(&d0[..lo]);
+        dom.push(e.clone());
+        dom.extend_from_slice(&d0[lo..]);
+        vals.extend_from_slice(&v0[..lo]);
+        vals.push(Value::Int(1));
+        vals.extend_from_slice(&v0[lo..]);
+        return Some(make_fcn_owned(dom, vals));
+    }
+    let n = if plus { bag_add(bag_n(&v0[lo]), 1).ok()? } else { bag_n(&v0[lo]) - 1 };
+    if n > 0 {
+        if let Value::Fcn(f) = b {
+            // the same elements with another count: the domain is shared
+            let mut vals = f.vals.clone();
+            vals[lo] = Value::Int(n);
+            return Some(Value::Fcn(Rc::new(FcnV::new(f.dom.clone(), vals))));
+        }
+        let mut vals = v0.to_vec();
+        vals[lo] = Value::Int(n);
+        return Some(make_fcn_owned(d0.into_owned(), vals));
+    }
+    let mut dom = Vec::with_capacity(d0.len() - 1);
+    let mut vals = Vec::with_capacity(d0.len() - 1);
+    dom.extend_from_slice(&d0[..lo]);
+    dom.extend_from_slice(&d0[lo + 1..]);
+    vals.extend_from_slice(&v0[..lo]);
+    vals.extend_from_slice(&v0[lo + 1..]);
+    Some(make_fcn_owned(dom, vals))
+}
 fn mk_bag(m: Vec<(Value, i64)>) -> R<Value> {
     make_fcn_from_pairs(m.into_iter().filter(|p| p.1 > 0).map(|(d, n)| (d, Value::Int(n))).collect())
 }

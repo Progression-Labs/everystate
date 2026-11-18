@@ -219,6 +219,68 @@ struct Comp {
     budget: i64,
     /// set while compiling an expression whose value may depend on the next state
     unstable: bool,
+    /// what the expression just compiled is known to build (see `One`); `shape_ok` is set by the cases
+    /// of `expr0` that leave a shape for their caller
+    shape: Option<One>,
+    shape_ok: bool,
+}
+
+/// The expression just compiled is `{e}` or `SetToBag({e})`, possibly behind inlined definitions:
+/// `elem` computes `e` after the slots in `clear` are reset. Consumers (`S \cup {e}`, `S \ {e}`,
+/// `B (+) SetToBag({e})`, `B (-) SetToBag({e})`) then update the set or bag directly instead of building
+/// the one-element value first.
+#[derive(Clone)]
+struct One {
+    bag: bool,
+    elem: Rc<CE>,
+    clear: Vec<usize>,
+}
+impl One {
+    #[inline]
+    fn eval(&self, cx: &Cx) -> R<Value> {
+        for &s in &self.clear {
+            cx.f.clear(s);
+        }
+        (self.elem)(cx)
+    }
+}
+
+/// Position of `e` in the sorted `es`: (index, found). None when a comparison fails.
+fn locate(es: &[Value], e: &Value) -> Option<(usize, bool)> {
+    let (mut lo, mut hi) = (0, es.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let c = match scalar_cmp(&es[mid], e) {
+            Some(c) => c,
+            None => compare(&es[mid], e).ok()?,
+        };
+        match c {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Some((mid, true)),
+        }
+    }
+    Some((lo, false))
+}
+/// `s \cup {e}` (add) or `s \ {e}` for an explicit set; None for the general code to decide.
+fn set_one(s: &Rc<SetV>, e: &Value, add: bool) -> Option<Value> {
+    let es = match &s.k {
+        SetK::Enum(es) => es,
+        _ => return None,
+    };
+    let (i, found) = locate(es, e)?;
+    if found == add {
+        return Some(Value::Set(s.clone()));
+    }
+    let mut out = Vec::with_capacity(if add { es.len() + 1 } else { es.len() - 1 });
+    out.extend_from_slice(&es[..i]);
+    if add {
+        out.push(e.clone());
+        out.extend_from_slice(&es[i..]);
+    } else {
+        out.extend_from_slice(&es[i + 1..]);
+    }
+    Some(SetV::of(out))
 }
 
 enum Found {
@@ -437,6 +499,23 @@ impl Comp {
     }
 
     fn expr(&mut self, n: N, sc: &Rc<Sc>) -> CE {
+        self.shape = None;
+        self.shape_ok = false;
+        let ce = self.expr0(n, sc);
+        if !std::mem::replace(&mut self.shape_ok, false) {
+            self.shape = None;
+        }
+        ce
+    }
+    /// Passes the shape of an inlined body on to the caller of the inlining: the slots of the call are
+    /// reset before the element is computed.
+    fn keep_shape(&mut self, clear: &[usize]) {
+        if let Some(sh) = &mut self.shape {
+            sh.clear.extend_from_slice(clear);
+            self.shape_ok = true;
+        }
+    }
+    fn expr0(&mut self, n: N, sc: &Rc<Sc>) -> CE {
         self.budget -= 1;
         if self.budget < 0 {
             return self.fallback(n, sc);
@@ -726,13 +805,24 @@ impl Comp {
                 Box::new(move |cx| {
                     let mut f = base(cx)?;
                     for (path, val) in &ups {
-                        let mut p = Vec::with_capacity(path.len());
-                        for x in path {
-                            p.push(x(cx)?);
-                        }
+                        let mut short: [Value; 2] = [Value::Undef, Value::Undef];
+                        let long: Vec<Value>;
+                        let p: &[Value] = if path.len() <= 2 {
+                            for (i, x) in path.iter().enumerate() {
+                                short[i] = x(cx)?;
+                            }
+                            &short[..path.len()]
+                        } else {
+                            let mut v = Vec::with_capacity(path.len());
+                            for x in path {
+                                v.push(x(cx)?);
+                            }
+                            long = v;
+                            &long
+                        };
                         f = cx.ev.except_with(
                             f,
-                            &p,
+                            p,
                             0,
                             &mut |old| {
                                 cx.f.set(at, old);
@@ -786,7 +876,7 @@ impl Comp {
     fn def_app(&mut self, n: N, d: &'static Def, args: &'static [Node], sc: &Rc<Sc>) -> CE {
         let d = d.over.get().unwrap_or(d);
         if let Some(bi) = d.builtin.get() {
-            return self.builtin(n, bi, args, sc);
+            return self.builtin(n, d, bi, args, sc);
         }
         let body = match d.body.get() {
             Some(b) if d.inst.is_none() => b,
@@ -816,13 +906,14 @@ impl Comp {
                 self.stack.push(id);
                 let b = self.expr(body, &inner);
                 self.stack.pop();
+                self.keep_shape(&clear);
                 with_clear(clear, b)
             }
             None => self.fallback(n, sc),
         }
     }
 
-    fn builtin(&mut self, n: N, bi: &'static Builtin, args: &'static [Node], sc: &Rc<Sc>) -> CE {
+    fn builtin(&mut self, n: N, d: &'static Def, bi: &'static Builtin, args: &'static [Node], sc: &Rc<Sc>) -> CE {
         if bi.lazy || bi.ops != 0 {
             return self.fallback(n, sc);
         }
@@ -831,7 +922,43 @@ impl Comp {
                 return Box::new(move |_| Ok(v.clone()));
             }
         }
-        let ces: Vec<CE> = args.iter().map(|a| self.expr(a, sc)).collect();
+        let bags = name_str(d.module).as_ref() == "Bags";
+        let opname = name_str(d.name);
+        let mut ces: Vec<CE> = Vec::with_capacity(args.len());
+        let mut last_shape = None;
+        for a in args {
+            ces.push(self.expr(a, sc));
+            last_shape = self.shape.take();
+        }
+        if bags && args.len() == 1 && opname.as_ref() == "SetToBag" {
+            // SetToBag({e}): remembered for a consumer
+            if let Some(sh) = last_shape.take() {
+                if !sh.bag {
+                    self.shape = Some(One { bag: true, ..sh });
+                    self.shape_ok = true;
+                }
+            }
+        }
+        if bags && args.len() == 2 && matches!(opname.as_ref(), "\\oplus" | "\\ominus") {
+            if let Some(sh) = last_shape.take() {
+                if sh.bag {
+                    // B (+) SetToBag({e}) / B (-) SetToBag({e}): one element in or out of the bag
+                    let plus = opname.as_ref() == "\\oplus";
+                    let mut it = ces.into_iter();
+                    let (b, one) = (it.next().unwrap(), it.next().unwrap());
+                    return Box::new(move |cx| {
+                        let bv = b(cx)?;
+                        let e = sh.eval(cx)?;
+                        if let Some(v) = crate::stdlib::bag_one(&bv, &e, plus) {
+                            return Ok(v);
+                        }
+                        // anything unusual: the operator itself, on the one-element bag
+                        let y = one(cx)?;
+                        cx.ev.call_builtin(bi, &[bv, y])
+                    });
+                }
+            }
+        }
         if bi.arith != 0 && ces.len() == 2 {
             let mut it = ces.into_iter();
             let (x, y) = (it.next().unwrap(), it.next().unwrap());
@@ -949,6 +1076,18 @@ impl Comp {
             }
             K::Cup => {
                 let (x, y) = (self.expr(&a[0], sc), self.expr(&a[1], sc));
+                if let Some(sh) = self.shape.take().filter(|sh| !sh.bag) {
+                    // S \cup {e}
+                    return Box::new(move |cx| {
+                        let xs = as_set(x(cx)?)?;
+                        let e = sh.eval(cx)?;
+                        if let Some(v) = set_one(&xs, &e, true) {
+                            return Ok(v);
+                        }
+                        let ys = as_set(y(cx)?)?;
+                        cx.ev.set_union(xs, ys)
+                    });
+                }
                 Box::new(move |cx| {
                     let x = as_set(x(cx)?)?;
                     let y = as_set(y(cx)?)?;
@@ -958,7 +1097,16 @@ impl Comp {
             K::Diff | K::Cap => {
                 let (x, y) = (self.expr(&a[0], sc), self.expr(&a[1], sc));
                 let diff = k == K::Diff;
+                let one = self.shape.take().filter(|sh| !sh.bag && diff);
                 Box::new(move |cx| {
+                    if let Some(sh) = &one {
+                        // S \ {e}
+                        let xs = as_set(x(cx)?)?;
+                        let e = sh.eval(cx)?;
+                        if let Some(v) = set_one(&xs, &e, false) {
+                            return Ok(v);
+                        }
+                    }
                     let x = as_set(x(cx)?)?;
                     let y = as_set(y(cx)?)?;
                     if x.reducible() && (diff || y.reducible()) {
@@ -972,6 +1120,12 @@ impl Comp {
                     }
                     Ok(Value::Set(Rc::new(SetV::new(if diff { SetK::Diff(x, y) } else { SetK::Cap(x, y) }))))
                 })
+            }
+            K::SetEnum if a.len() == 1 => {
+                let e: Rc<CE> = Rc::new(self.expr(&a[0], sc));
+                self.shape = Some(One { bag: false, elem: e.clone(), clear: vec![] });
+                self.shape_ok = true;
+                Box::new(move |cx| Ok(SetV::of(vec![e(cx)?])))
             }
             K::SetEnum => {
                 let ces: Vec<CE> = a.iter().map(|x| self.expr(x, sc)).collect();
@@ -1069,7 +1223,8 @@ impl Comp {
         match &n.e {
             E::Op(k, a) => match k {
                 K::And => {
-                    let items: Vec<AE> = a.iter().map(|x| self.act(x, sc)).collect();
+                    // (the first conjunct starts with the same assignments as the conjunction itself)
+                    let items: Vec<AE> = a.iter().enumerate().map(|(i, x)| if i == 0 { self.act_inner(x, sc) } else { self.act(x, sc) }).collect();
                     if items.is_empty() {
                         return Box::new(|_, k| k());
                     }
@@ -1082,7 +1237,7 @@ impl Comp {
                     Box::new(move |cx, k| conj(&items, 0, cx, k))
                 }
                 K::Or => {
-                    let items: Vec<AE> = a.iter().map(|x| self.act(x, sc)).collect();
+                    let items: Vec<AE> = a.iter().map(|x| self.act_inner(x, sc)).collect();
                     Box::new(move |cx, k| {
                         for it in &items {
                             it(cx, k)?;
@@ -1092,7 +1247,7 @@ impl Comp {
                 }
                 K::If => {
                     let c = self.expr(&a[0], sc);
-                    let (t, e) = (self.act(&a[1], sc), self.act(&a[2], sc));
+                    let (t, e) = (self.act_inner(&a[1], sc), self.act_inner(&a[2], sc));
                     Box::new(move |cx, k| if truth(c(cx)?)? { t(cx, k) } else { e(cx, k) })
                 }
                 K::Eq | K::In => {
@@ -1225,7 +1380,7 @@ impl Comp {
                 };
                 let set = self.expr(set, sc);
                 let slot = self.slot();
-                let body = self.act(body, &push(sc, ScK::Slot { name: nm, slot }));
+                let body = self.act_inner(body, &push(sc, ScK::Slot { name: nm, slot }));
                 Box::new(move |cx, k| {
                     let s = as_set(set(cx)?)?;
                     if let SetK::Interval(lo, hi) = &s.k {
@@ -1244,8 +1399,8 @@ impl Comp {
             }
             E::Quant { .. } => fb_act(n, sc),
             E::Case { arms, other } => {
-                let arms: Vec<(CE, AE)> = arms.iter().map(|(c, e)| (self.expr(c, sc), self.act(e, sc))).collect();
-                let other = other.as_ref().map(|o| self.act(o, sc));
+                let arms: Vec<(CE, AE)> = arms.iter().map(|(c, e)| (self.expr(c, sc), self.act_inner(e, sc))).collect();
+                let other = other.as_ref().map(|o| self.act_inner(o, sc));
                 Box::new(move |cx, k| {
                     for (c, e) in &arms {
                         if truth(c(cx)?)? {
@@ -1260,7 +1415,7 @@ impl Comp {
             }
             E::Let { defs, body } => match self.let_scope(defs, sc) {
                 Some((inner, clear)) => {
-                    let body = self.act(body, &inner);
+                    let body = self.act_inner(body, &inner);
                     Box::new(move |cx, k| {
                         for &s in &clear {
                             cx.f.clear(s);
@@ -1292,7 +1447,7 @@ impl Comp {
                         match self.bind_args(&d.params, args, root, sc) {
                             Some((inner, clear)) => {
                                 self.stack.push(id);
-                                let b = self.act(body, &inner);
+                                let b = self.act_inner(body, &inner);
                                 self.stack.pop();
                                 Box::new(move |cx, k| {
                                     for &s in &clear {
@@ -1407,7 +1562,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
     let mut actions = vec![];
     for a in &model.actions {
         let mut seen = HashSet::new();
-        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false };
+        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false, shape: None, shape_ok: false };
         let root = if impure(a.e, &mut seen) { None } else { root_scope(&a.ctx, &mut c, &mut seen) };
         let (root, clear) = match root {
             Some(x) => x,
@@ -1435,7 +1590,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
     let mut invariants = vec![];
     for p in &model.invariants {
         let mut seen = HashSet::new();
-        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false };
+        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false, shape: None, shape_ok: false };
         let root = if impure(p.e, &mut seen) || level_of(p.e) > 1 { None } else { root_scope(&p.ctx, &mut c, &mut seen) };
         let (root, clear) = match root {
             Some(x) => x,
