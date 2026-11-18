@@ -34,6 +34,9 @@ FiltNext == /\ x < 3 /\ x' = x + 1 /\ y' = y /\ s' = {v \in SUBSET (0..x) : Card
 DeadNext == x < 6 /\ Inc
 ErrNext == Inc /\ (x = 9 /\ y = 4 => Assert(FALSE, "boom"))
 PartNext == /\ x < N /\ x' = x + 1 /\ y' \in {y, (y + 1) % 5} /\ s' = s /\ (x < 8 => log' = log)
+Rare == x = 5 /\ y = 3 /\ s = {0, 1, 2, 3, 4} /\ log = <<>>
+RarePrintNext == Next /\ (Rare => PrintT(<<"rare", x, y>>))
+RareStrNext == Next \/ (Rare /\ x' = x /\ y' = y /\ s' = s /\ log' = <<ToString(x + 100)>>)
 ActProp == [][x' # 11 \/ y' # 4]_vars
 Live == <>(x = N /\ y = 9)
 ASSUME TLCSet(1, 0)

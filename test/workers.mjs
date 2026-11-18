@@ -1,7 +1,8 @@
 // `-workers N` against `-workers 1` on test/workers/Base.tla: for every configuration below the complete
 // output (TLC text and -tool framing, the -json line, the `-dump dot` graph and the exit status) must be
 // the same, apart from the banner's worker count, times, and the one line that says the search went
-// back to one worker. Each case also states whether it has to fall back.
+// back to one worker. Each case also states whether states have to be handed back to the sequential
+// search because of an order-dependent operator (and with which reason, when that happens for good).
 //
 // usage: node test/workers.mjs [--workers 4] [--bin path/to/everystate] [--repeat 3]
 import fs from 'node:fs';
@@ -35,6 +36,9 @@ const cases = [
   ['liveness', [...S, 'SPECIFICATION Spec', 'PROPERTY Live'], 13, ''],
   ['liveness-view', [...S, 'SPECIFICATION Spec', 'PROPERTY Live', 'VIEW View'], 13, ''],
   ['liveness-symmetry', [...S, 'SPECIFICATION Spec', 'PROPERTY Live', 'SYMMETRY Perms'], 13, ''],
+  // one state in the whole graph prints / makes a new string: that level is finished sequentially, the rest stays parallel
+  ['rare-print', [...S, 'INIT Init', 'NEXT RarePrintNext', 'INVARIANT TypeOK'], 0, 'once'],
+  ['rare-new-string', [...S, 'INIT Init', 'NEXT RareStrNext', 'INVARIANT TypeOK'], 0, 'once'],
   ['print', ['CONSTANTS N = 6', 'P = {p1}', 'INIT Init', 'NEXT PrintNext', 'INVARIANT TypeOK'], 0, 'prints'],
   ['tlcset', [...S, 'INIT Init', 'NEXT SetNext', 'INVARIANT TypeOK'], 0, 'TLCSet'],
   ['tlcget-register', [...S, 'INIT Init', 'NEXT RegNext', 'INVARIANT TypeOK'], 0, 'TLCGet'],
@@ -45,17 +49,20 @@ const cases = [
 ];
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'workers-test-'));
 const NOTE = /^The search continues with 1 worker instead of \d+: (.*)\n/m;
+const DEBUG = /^par(?: cpu| times)?: .*\n/mg, BACK = /states expanded by workers, (\d+) handed back/;
 const norm = s => s.replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T').replace(/with \d+ workers? on \d+ cores/, 'with W').replace(/Finished in \d+\w*( \d+\w+)?/, 'Finished in')
-  .replace(/\(([\d,]+) s\/min\)|\(([\d,]+) ds\/min\)/g, '(R)').replace(NOTE, '');
+  .replace(/\(([\d,]+) s\/min\)|\(([\d,]+) ds\/min\)/g, '(R)').replace(NOTE, '').replace(DEBUG, '');
 function run(cfg, w, flags, par) {
   const env = { ...process.env };
   delete env.EVERYSTATE_PAR_MIN; delete env.EVERYSTATE_PAR_CHUNK;
+  delete env.EVERYSTATE_PAR_DEBUG;
+  if (par !== null) env.EVERYSTATE_PAR_DEBUG = '1';
   if (par) { env.EVERYSTATE_PAR_MIN = '1'; env.EVERYSTATE_PAR_CHUNK = par; }
   const dot = path.join(tmp, 'g.dot');
   fs.rmSync(dot, { force: true });
   const r = spawnSync(bin, ['-workers', String(w), ...flags, '-dump', 'dot,actionlabels', dot, '-config', cfg, spec], { encoding: 'utf8', env, maxBuffer: 1 << 28 });
   const out = (r.stdout ?? '') + (r.stderr ?? '');
-  return { code: r.status, out: norm(out), note: NOTE.exec(out)?.[1] ?? '', graph: fs.existsSync(dot) ? fs.readFileSync(dot, 'utf8') : '' };
+  return { code: r.status, out: norm(out), note: NOTE.exec(out)?.[1] ?? '', back: Number(BACK.exec(out)?.[1] ?? 0), graph: fs.existsSync(dot) ? fs.readFileSync(dot, 'utf8') : '' };
 }
 let failed = 0;
 for (const [name, lines, exit, fallback] of cases) {
@@ -66,12 +73,14 @@ for (const [name, lines, exit, fallback] of cases) {
     const a = run(cfg, 1, flags, null);
     if (a.code !== exit) problems.push(`${flags[0] ?? 'text'}: exit ${a.code}, expected ${exit}`);
     for (let k = 0; k < repeat; k++) {
-      const b = run(cfg, workers, flags, ['1', '3', ''][k % 3] || null);
+      const b = run(cfg, workers, flags, ['1', '3', ''][k % 3]);
       const what = `${flags[0] ?? 'text'} run ${k + 1}`;
       if (b.code !== a.code) problems.push(`${what}: exit ${b.code} != ${a.code}`);
       else if (b.out !== a.out) problems.push(`${what}: output differs`);
       else if (b.graph !== a.graph) problems.push(`${what}: state graph differs`);
-      if (flags[0] !== '-json' && k % 3 < 2 && (fallback ? !b.note.includes(fallback) : b.note !== '')) problems.push(`${what}: fall-back note is "${b.note}", expected ${fallback ? `one about "${fallback}"` : 'none'}`);
+      if (fallback === 'once') { if (b.note !== '' || (k % 3 < 2 && b.back !== 1)) problems.push(`${what}: ${b.back} states handed back, note "${b.note}"; expected exactly one and no note`); }
+      else if (k % 3 < 2 && (fallback === '') !== (b.back === 0)) problems.push(`${what}: ${b.back} states handed back to the sequential search, expected ${fallback ? 'some' : 'none'}`);
+      if (fallback !== 'once' && flags[0] !== '-json' && (fallback ? b.note !== '' && !b.note.includes(fallback) : b.note !== '')) problems.push(`${what}: fall-back note is "${b.note}", expected ${fallback ? `one about "${fallback}"` : 'none'}`);
     }
   }
   if (problems.length) failed++;

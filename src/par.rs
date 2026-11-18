@@ -873,6 +873,8 @@ pub struct Par {
     de: RefCell<De>,
     t0: f64,
     off: bool,
+    /// how often a level went back to the sequential search because of an order-dependent operator
+    strikes: u32,
     /// for EVERYSTATE_PAR_DEBUG: levels and states searched by the workers, and why they stopped
     stats: (u64, u64, Option<String>),
     /// milliseconds: before the first parallel level, in the workers, in the merge
@@ -884,7 +886,7 @@ pub fn prepare(ck: &mut Checker) {
     if let Some(cfg) = ck.opts.par.clone() {
         if cfg.workers > 1 {
             let t0 = ck.t_start;
-            ck.par = Some(Box::new(Par { cfg, engine: None, store: vec![], next: None, de: RefCell::new(De::default()), t0, off: false, stats: (0, 0, None), times: (0.0, 0.0, 0.0) }));
+            ck.par = Some(Box::new(Par { cfg, engine: None, store: vec![], next: None, de: RefCell::new(De::default()), t0, off: false, strikes: 0, stats: (0, 0, None), times: (0.0, 0.0, 0.0) }));
             ck.level_end = ck.head;
         }
     }
@@ -931,7 +933,7 @@ pub fn finish(ck: &mut Checker) {
             let main = cpu(std::path::Path::new("/proc/thread-self/schedstat"));
             let all: f64 = std::fs::read_dir("/proc/self/task").map(|d| d.flatten().map(|e| cpu(&e.path().join("schedstat"))).sum()).unwrap_or(0.0);
             eprintln!("par cpu: {:.0} ms main thread, {:.0} ms other threads", main, all - main);
-            eprintln!("par: {} levels, {} of {} states expanded by workers{}", par.stats.0, par.stats.1, ck.head, par.stats.2.as_ref().map_or(String::new(), |w| format!("; stopped: {}", w)));
+            eprintln!("par: {} levels, {} of {} states expanded by workers, {} handed back{}", par.stats.0, par.stats.1, ck.head, par.strikes, par.stats.2.as_ref().map_or(String::new(), |w| format!("; stopped: {}", w)));
             eprintln!("par times: {:.0} ms before, {:.0} ms workers, {:.0} ms merge, {:.0} ms total", par.times.0, par.times.1, par.times.2, ck.ev.host.borrow().now_ms() - par.t0);
         }
         par.engine = None;
@@ -966,6 +968,21 @@ impl Par {
         self.materialize(ck, ck.head);
         self.stats.2 = Some(why.to_string());
         events.note(&format!("The search continues with 1 worker instead of {}: {}.", self.cfg.workers, why));
+    }
+
+    /// A worker met a state that only the sequential search may expand (an operator whose effect depends
+    /// on the order of exploration, a value that cannot be passed on). The sequential search finishes
+    /// this level from that state on, which keeps every such effect in its sequential order; the next
+    /// level goes to the workers again. They are replaced, because the abandoned evaluation may have left
+    /// something behind in their evaluators. The third time is the last.
+    fn strike(&mut self, ck: &mut Checker, events: &mut dyn Events, why: &str) {
+        self.strikes += 1;
+        if self.strikes >= 3 {
+            return self.give_up(ck, events, why);
+        }
+        self.engine = None;
+        self.next = None;
+        self.materialize(ck, ck.head);
     }
 
     /// Whether `n` states are worth handing to the workers; starts them when they are.
@@ -1076,7 +1093,7 @@ impl Par {
         }
         if p < n {
             match event {
-                Some(Event::Fallback(why)) => self.give_up(ck, events, &why),
+                Some(Event::Fallback(why)) => self.strike(ck, events, &why),
                 _ => {
                     self.off = true;
                     self.engine = None;
@@ -1211,7 +1228,7 @@ impl Par {
         }
         if !complete {
             match event {
-                Some(Event::Fallback(why)) => self.give_up(ck, events, &why),
+                Some(Event::Fallback(why)) => self.strike(ck, events, &why),
                 _ => {
                     // the sequential search re-expands state `head` and reports what the worker met
                     self.off = true;

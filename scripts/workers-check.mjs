@@ -65,8 +65,8 @@ async function worker() {
     let verdict = 'SAME', detail = '', how = '';
     for (let k = 0; k < repeat && verdict === 'SAME'; k++) {
       const par = await run(c, workers, true);
-      const dbg = /^par: (\d+) levels, (\d+) of (\d+) states expanded by workers(?:; stopped: (.*))?$/m.exec(par.err);
-      how = !dbg ? 'no parallel search' : dbg[4] ? (dbg[4] === 'violation or error' ? 'parallel until the violation' : 'fell back: ' + dbg[4]) : dbg[1] === '0' ? 'never parallel (small)' : 'parallel';
+      const dbg = /^par: (\d+) levels, (\d+) of (\d+) states expanded by workers, (\d+) handed back(?:; stopped: (.*))?$/m.exec(par.err);
+      how = !dbg ? 'no parallel search' : dbg[5] ? (dbg[5] === 'violation or error' ? 'parallel until the violation' : 'fell back: ' + dbg[5]) : dbg[1] === '0' ? 'never parallel (small)' : dbg[4] !== '0' ? 'parallel, some levels finished sequentially' : 'parallel';
       if (base.sig || par.sig) { verdict = 'TIMEOUT'; }
       else if (par.code !== base.code) { verdict = 'DIFF'; detail = `exit ${par.code} != ${base.code} ${par.err.slice(0, 300)}`; }
       else if (par.all !== base.all) {
