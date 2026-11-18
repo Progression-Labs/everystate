@@ -16,11 +16,23 @@
 //!    next state id, as in the sequential search, so ids, parents, counts, depth and the state graph
 //!    are identical to a one-worker run.
 //!
-//! Whatever is not this plain path is not handled here at all: when a worker meets a violation, an
+//! Whatever is not this plain path is not handled here at all. When a worker meets a violation, an
 //! error, a deadlock, or an operator whose effect depends on the order of exploration (Print, TLCSet,
-//! RandomElement, I/O, a new string ...), it reports the position of that state. The level is merged up
-//! to that state and the sequential loop takes over from exactly there, re-expands the state and
-//! reports whatever it finds; the workers never print or write anything.
+//! TLCGet of a register or a statistic, RandomElement, I/O, a string that does not exist yet ...), it
+//! reports the position of that state and stops; the workers never print, write or decide anything.
+//! The level is merged up to that state and the sequential loop of `Checker::search` takes over from
+//! exactly there: it re-expands the state and reports what it finds, with its own code. After an
+//! order-dependent operator it finishes the level, so that every such effect happens in the sequential
+//! order, and the next level goes to (fresh) workers again; the third time the search stays sequential
+//! and says so.
+//!
+//! The candidates for initial states are dealt with in the same way (`Par::init`).
+//!
+//! States found by a parallel level exist as bytes only; `Checker::state_at` rebuilds one for a trace,
+//! and `finish` rebuilds all of them when the state graph is going to be read (`-dump`, liveness).
+//!
+//! Test hooks (environment): EVERYSTATE_PAR_MIN, EVERYSTATE_PAR_CHUNK (see `cli::par_config`) and
+//! EVERYSTATE_PAR_DEBUG (a summary of what the workers did, on standard error).
 use crate::checker::{Checker, Events, FpSet, ParConfig, NO_PARENT};
 use crate::eval::{set_stack_limit, StateData, StateRef};
 use crate::host::Host;
@@ -469,7 +481,7 @@ impl De {
         let mut pos = 0;
         let mut vals = Vec::with_capacity(nvars);
         for _ in 0..nvars {
-            // (a cache of whole variables by their encoding was tried here: it cost more than decoding)
+            // (a cache of whole variables keyed by their encoding was tried here: slower than decoding)
             let _len = get_u(b, &mut pos);
             vals.push(self.value(b, &mut pos));
         }
