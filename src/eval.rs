@@ -438,6 +438,8 @@ pub struct Evaluator {
     /// lazily built records for TLCGet("spec")
     pub spec_info: RefCell<Option<Box<dyn Fn() -> R<Value>>>>,
     pub rng: Cell<u64>,
+    /// EVERYSTATE_CACHE_STATS: the read tracker of the step-cache estimate (see stepstats.rs)
+    pub steps: crate::stepstats::StepStats,
     at: Name,
     lambda: Name,
     enabled_mark: Name,
@@ -446,7 +448,7 @@ pub struct Evaluator {
 /// The index of the variable an expression names directly: a declared variable used outside any instance
 /// environment (where a substitution could stand for it). None for everything else.
 #[inline]
-fn plain_var(e: N, ctx: &C) -> Option<i64> {
+pub(crate) fn plain_var(e: N, ctx: &C) -> Option<i64> {
     if let E::App { args, sel, r, .. } = &e.e {
         if let Res::Decl(d) = r.get() {
             if d.is_var && d.idx.get() >= 0 && args.is_empty() && sel.is_none() && ctx.as_ref().map_or(true, |c| !c.env && c.base.is_none()) {
@@ -485,6 +487,7 @@ impl Evaluator {
             trace_stack: RefCell::new(Vec::new()),
             spec_info: RefCell::new(None),
             rng: Cell::new(0x9E3779B97F4A7C15),
+            steps: crate::stepstats::StepStats::new(),
             at: name("@"),
             lambda: name("LAMBDA"),
             enabled_mark: name("\u{0}enabled"),
@@ -593,6 +596,10 @@ impl Evaluator {
             }
             if s == self.cur_id() && !self.init_mode.get() && self.prime_depth.get() == 0 {
                 self.st_touch.set(self.st_touch.get() + 1);
+                if self.steps.on.get() {
+                    // computed from the state before this unit began: it stands for the reads it made
+                    self.steps.elem(usize::MAX >> 8, Ok(e as *const Node as usize as u64), value_word(&v.borrow()));
+                }
                 return Ok(v.borrow().clone());
             }
         }
@@ -969,6 +976,11 @@ impl Evaluator {
         let def = def.resolved();
         if let Some(bi) = def.builtin.get() {
             let na = args.len();
+            if self.steps.on.get() {
+                if let Some(v) = self.steps_builtin(def, args, ctx)? {
+                    return Ok(v);
+                }
+            }
             if bi.arith != 0 && na == 2 {
                 // integer arithmetic and comparison without the argument buffer and the indirect call
                 let x = self.eval(&args[0], ctx)?;
@@ -1134,6 +1146,9 @@ impl Evaluator {
                                 if idx >= 0 {
                                     let v = self.cur.borrow().get(idx as usize);
                                     self.pr_touch.set(self.pr_touch.get() + 1);
+                                    if self.steps.on.get() {
+                                        self.steps.var(idx as usize, &v, true);
+                                    }
                                     if matches!(v, Value::Undef) {
                                         return self.at_node(undefined_ident(d.name), n);
                                     }
@@ -1158,6 +1173,9 @@ impl Evaluator {
                     }
                     if matches!(v, Value::Undef) {
                         return self.at_node(undefined_ident(d.name), n);
+                    }
+                    if self.steps.on.get() {
+                        self.steps.var(idx.max(0) as usize, &v, self.prime_depth.get() > 0);
                     }
                     return Ok(v);
                 }
@@ -1373,6 +1391,9 @@ impl Evaluator {
                                             self.pr_touch.set(self.pr_touch.get() + 1);
                                         } else {
                                             self.st_touch.set(self.st_touch.get() + 1);
+                                        }
+                                        if self.steps.on.get() {
+                                            self.steps.var(idx as usize, &v, self.prime_depth.get() > 0);
                                         }
                                         return Ok(v);
                                     }
@@ -1610,20 +1631,40 @@ impl Evaluator {
                 Ok(Value::Set(Rc::new(SetV::new(SetK::RecSet(Rc::new(idx.iter().map(|&i| fields[i].0).collect()), sets)))))
             }
             E::Except { base, updates } => {
-                let mut f = self.eval(base, ctx)?;
+                // (step-cache estimate: an EXCEPT on a variable reads the elements it replaces, when it uses them)
+                let pv = if self.steps.on.get() { plain_var(base, ctx) } else { None };
+                let mut f = match pv {
+                    Some(_) => self.steps_quiet(base, ctx)?,
+                    None => self.eval(base, ctx)?,
+                };
                 for (path, val) in updates {
                     let mut p = Vec::with_capacity(path.len());
                     for x in path {
                         p.push(self.eval(x, ctx)?);
+                    }
+                    if let Some(i) = pv {
+                        let plain = path.len() == 1 && (matches!(val.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val.e, E::App { args, sel: None, .. } if args.is_empty()));
+                        if !plain {
+                            let old = self.apply_fcn(&f, &p[0], None).and_then(|o| value_word(&o));
+                            self.steps.elem(i as usize, value_word(&p[0]), old);
+                        }
                     }
                     f = self.except_update(f, &p, 0, val, ctx, n)?;
                 }
                 Ok(f)
             }
             E::FnApp { f, args } => {
-                let fv = self.eval_fn_operand(f, ctx)?;
+                // (step-cache estimate: var[k] reads one element of the variable)
+                let pv = if self.steps.on.get() { plain_var(f, ctx) } else { None };
+                let fv = match pv {
+                    Some(_) => self.steps_quiet(f, ctx)?,
+                    None => self.eval_fn_operand(f, ctx)?,
+                };
                 let arg = self.eval_fn_arg(args, ctx)?;
                 let v = self.apply_fcn(&fv, &arg, Some(n))?;
+                if let Some(i) = pv {
+                    self.steps.elem(i as usize, value_word(&arg), value_word(&v));
+                }
                 if let Value::LazyFcn(lf) = &v {
                     return lf.force(self);
                 }
@@ -1674,6 +1715,17 @@ impl Evaluator {
             K::Eqv => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? == self.eval_bool(&a[1], ctx)?)),
             K::Eq => Ok(Value::Bool(val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
             K::Ne => Ok(Value::Bool(!val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
+            K::In | K::NotIn if self.steps.on.get() && plain_var(&a[1], ctx).is_some() => {
+                // (step-cache estimate: x \in var reads one element)
+                let x = self.eval(&a[0], ctx)?;
+                let s = match self.steps_quiet(&a[1], ctx)? {
+                    Value::Set(s) => s,
+                    _ => return Ok(Value::Bool(self.eval_set(&a[1], ctx)?.contains(&x)? == (k == K::In))),
+                };
+                let r = s.contains(&x)?;
+                self.steps.elem(plain_var(&a[1], ctx).unwrap() as usize, value_word(&x), Ok(r as u64));
+                Ok(Value::Bool(r == (k == K::In)))
+            }
             K::In => {
                 let x = self.eval(&a[0], ctx)?;
                 Ok(Value::Bool(self.eval_set(&a[1], ctx)?.contains(&x)?))
@@ -1681,6 +1733,27 @@ impl Evaluator {
             K::NotIn => {
                 let x = self.eval(&a[0], ctx)?;
                 Ok(Value::Bool(!self.eval_set(&a[1], ctx)?.contains(&x)?))
+            }
+            K::Cup | K::Diff if self.steps.on.get() && plain_var(&a[0], ctx).is_some() => {
+                // (step-cache estimate: var \cup S and var \ S are changes to the variable, not reads of it)
+                let x = match self.steps_quiet(&a[0], ctx)? {
+                    Value::Set(s) => s,
+                    _ => self.eval_set(&a[0], ctx)?,
+                };
+                let y = self.eval_set(&a[1], ctx)?;
+                if k == K::Cup {
+                    return self.set_union(x, y);
+                }
+                if x.reducible() {
+                    let mut out = Vec::new();
+                    for e in x.elems()? {
+                        if !y.contains(e)? {
+                            out.push(e.clone());
+                        }
+                    }
+                    return Ok(SetV::of(out));
+                }
+                Ok(Value::Set(Rc::new(SetV::new(SetK::Diff(x, y)))))
             }
             K::Subseteq => {
                 let (mut x, mut y) = (self.eval_set(&a[0], ctx)?, self.eval_set(&a[1], ctx)?);
@@ -1759,12 +1832,22 @@ impl Evaluator {
                 mk_set(all)
             }
             K::Domain => {
-                let f = self.eval_fn_operand(&a[0], ctx)?;
+                let pv = if self.steps.on.get() { plain_var(&a[0], ctx) } else { None };
+                let f = match pv {
+                    Some(_) => self.steps_quiet(&a[0], ctx)?,
+                    None => self.eval_fn_operand(&a[0], ctx)?,
+                };
                 if let Value::LazyFcn(lf) = &f {
                     return Ok(Value::Set(lf.domain(self)?));
                 }
                 match domain_of(&f) {
-                    Some(d) => Ok(Value::Set(d)),
+                    Some(d) => {
+                        let d = Value::Set(d);
+                        if let Some(i) = pv {
+                            self.steps_domain(i as usize, &d);
+                        }
+                        Ok(d)
+                    }
                     None => self.fail(format!("Attempted to apply the operator DOMAIN to the non-function value\n{}", fmt(&f)), n),
                 }
             }
@@ -1855,6 +1938,9 @@ impl Evaluator {
                                 self.pr_touch.set(self.pr_touch.get() + 1);
                             } else {
                                 self.st_touch.set(self.st_touch.get() + 1);
+                            }
+                            if self.steps.on.get() {
+                                self.steps.var(idx as usize, &v, self.prime_depth.get() > 0);
                             }
                             return Ok(v);
                         }
@@ -2689,7 +2775,7 @@ impl Evaluator {
         Ok(())
     }
 
-    fn enum_conj(&self, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
+    pub(crate) fn enum_conj(&self, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
         if i == items.len() {
             return k();
         }
@@ -2735,6 +2821,9 @@ impl Evaluator {
                         self.n_assigned.set(self.n_assigned.get() + 1);
                         set |= 1 << j;
                     } else {
+                        if self.steps.on.get() {
+                            self.steps.var(idx, &cur.get(idx), false);
+                        }
                         match val_eq(&nxt.get(idx), &cur.get(idx)) {
                             Ok(true) => {}
                             Ok(false) => {
@@ -2789,6 +2878,9 @@ impl Evaluator {
                     return r;
                 }
                 let old = if idx >= nv { self.eval(e, ctx)? } else { self.cur.borrow().get(idx) };
+                if self.steps.on.get() {
+                    self.steps.var(idx, &old, false);
+                }
                 if val_eq(&nxt.get(idx), &old)? {
                     return k();
                 }

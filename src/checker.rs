@@ -261,6 +261,7 @@ impl<'a> Checker<'a> {
     pub fn new(model: &'a Model, opts: CheckOptions) -> Checker<'a> {
         let ev = model.ev;
         let opts_record = opts.record_graph;
+        ev.steps.enabled.set(std::env::var_os("EVERYSTATE_CACHE_STATS").is_some_and(|v| !v.is_empty() && v != "0"));
         ev.stats.active.set(true);
         ev.stats.check_deadlock.set(opts.check_deadlock);
         {
@@ -816,7 +817,7 @@ impl<'a> Checker<'a> {
             ev.prime_depth.set(0);
             ev.call_depth.set(0);
             ev.n_assigned.set(0);
-            ev.enumerate(a.e, &a.ctx, &mut || {
+            let mut found = || {
                 for k in 0..n {
                     if nxt.is_undef(k) {
                         let missing = self.missing(&nxt);
@@ -834,12 +835,26 @@ impl<'a> Checker<'a> {
                 }
                 emit(nxt, ai as u32);
                 Ok(())
-            })?;
+            };
+            if ev.steps.enabled.get() {
+                ev.enumerate_units(ai, a.e, &a.ctx, &mut found)?;
+            } else {
+                ev.enumerate(a.e, &a.ctx, &mut found)?;
+            }
         }
         Ok(())
     }
 
     pub fn run(&mut self, events: &mut dyn Events) -> CheckResult {
+        let r = self.search(events);
+        if self.ev.steps.enabled.get() {
+            let m = self.model;
+            let report = self.ev.steps.report(&|ai| format!("{}{}", m.actions[ai].name, m.actions[ai].params));
+            eprint!("{}", report);
+        }
+        r
+    }
+    fn search(&mut self, events: &mut dyn Events) -> CheckResult {
         let m = self.model;
         if let Some(r) = self.check_assumptions() {
             return r;
