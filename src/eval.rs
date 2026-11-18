@@ -1638,10 +1638,22 @@ impl Evaluator {
                     None => self.eval(base, ctx)?,
                 };
                 for (path, val) in updates {
-                    let mut p = Vec::with_capacity(path.len());
-                    for x in path {
-                        p.push(self.eval(x, ctx)?);
-                    }
+                    // the keys of the path, on the stack when there are at most two (the usual case)
+                    let mut short: [Value; 2] = [Value::Undef, Value::Undef];
+                    let long: Vec<Value>;
+                    let p: &[Value] = if path.len() <= 2 {
+                        for (i, x) in path.iter().enumerate() {
+                            short[i] = self.eval(x, ctx)?;
+                        }
+                        &short[..path.len()]
+                    } else {
+                        let mut v = Vec::with_capacity(path.len());
+                        for x in path {
+                            v.push(self.eval(x, ctx)?);
+                        }
+                        long = v;
+                        &long
+                    };
                     if let Some(i) = pv {
                         let plain = path.len() == 1 && (matches!(val.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val.e, E::App { args, sel: None, .. } if args.is_empty()));
                         if !plain {
@@ -1649,7 +1661,7 @@ impl Evaluator {
                             self.steps.elem(i as usize, value_word(&p[0]), old);
                         }
                     }
-                    f = self.except_update(f, &p, 0, val, ctx, n)?;
+                    f = self.except_update(f, p, 0, val, ctx, n)?;
                 }
                 Ok(f)
             }
@@ -2857,6 +2869,19 @@ impl Evaluator {
                 ev.enum_unchanged(&items[i], ctx, &mut || go(ev, items, i + 1, ctx, &mut *k))
             }
             return go(self, items, 0, ctx, k);
+        }
+        if let E::App { args, sel: None, r, .. } = &e.e {
+            // a name for a tuple of variables (UNCHANGED vars): straight to the tuple
+            if let (Res::Def(d), true) = (r.get(), args.is_empty()) {
+                let d = d.over.get().unwrap_or(d);
+                if d.builtin.get().is_none() && d.inst.is_none() && d.params.is_empty() {
+                    if let Some(body) = d.body.get() {
+                        if matches!(body.e, E::Op(K::Tuple, _)) {
+                            return self.enum_unchanged(body, &base_of(ctx), k);
+                        }
+                    }
+                }
+            }
         }
         if let E::App { .. } = &e.e {
             let idx = self.as_var(e, ctx)?;

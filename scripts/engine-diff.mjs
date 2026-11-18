@@ -80,6 +80,7 @@ const run = (s, c, json) => new Promise(res => {
 });
 // what may differ between two runs of the same model: clock readings
 const scrub = s => s
+  .replace(/^step-cache estimate[^\n]*\n(  [^\n]*\n)*/gm, '') // the table EVERYSTATE_CACHE_STATS=1 adds to stderr
   .replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)')
   .replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T')
   .replace(/Finished in [^\n]*/g, 'Finished in D')

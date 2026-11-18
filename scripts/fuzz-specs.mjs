@@ -41,7 +41,8 @@ function actorSpec(r, name) {
   const has = bag ? 'BagIn(m, net)' : 'm \\in net';
   const dom = bag ? 'DOMAIN net' : 'net';
   const empty = bag ? 'EmptyBag' : '{}';
-  const upd = r.pick(['(@ + m.val) % K', 'IF m.val > @ THEN m.val ELSE @', 'm.val', '(@ + 1) % K']);
+  // (the first applies st outside its domain: an evaluation error part of the way through a state's successors)
+  const upd = r.chance(0.08) ? '@ + st[m.val]' : r.pick(['(@ + m.val) % K', 'IF m.val > @ THEN m.val ELSE @', 'm.val', '(@ + 1) % K']);
   const reply = r.chance(0.5);
   const viaOp = r.chance(0.5); // state update through an operator with delayed arguments
   const letForm = r.chance(0.4);
@@ -121,6 +122,7 @@ function plainSpec(r, name) {
   ]);
   const stepC = r.pick([
     '/\\ UNCHANGED <<x, q, s, rec>>',
+    '/\\ q\' = Tail(q) /\\ UNCHANGED <<x, s, rec>>', // fails on the empty sequence
     '/\\ q # <<>> /\\ q\' = Tail(q) /\\ x\' = Head(q) % M /\\ UNCHANGED <<s, rec>>',
     '/\\ (CASE x = 0 -> s\' = {} [] x = 1 -> s\' = s \\cup {p} [] OTHER -> s\' = s) /\\ UNCHANGED <<x, q, rec>>',
   ]);
@@ -138,7 +140,7 @@ function plainSpec(r, name) {
   return { tla: lines.join('\n') + '\n', cfg: cfg.join('\n') + '\n', flags: r.chance(0.5) ? ['-deadlock'] : [] };
 }
 
-const scrub = s => s.replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)').replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T').replace(/Finished in [^\n]*/g, 'Finished in D');
+const scrub = s => s.replace(/^step-cache estimate[^\n]*\n(  [^\n]*\n)*/gm, '').replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)').replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T').replace(/Finished in [^\n]*/g, 'Finished in D');
 const run = (s, d, name, flags, json) => {
   const r = spawnSync(s.bin, [...flags, ...(json ? ['-json'] : []), '-config', `${name}.cfg`, `${name}.tla`], { cwd: d, encoding: 'utf8', timeout, maxBuffer: 1 << 28, env: { ...process.env, ...s.env } });
   return { o: scrub(r.stdout ?? ''), e: scrub(r.stderr ?? ''), code: r.status, timedOut: r.error?.code === 'ETIMEDOUT' };
