@@ -164,35 +164,49 @@ fn pure_builtin(d: &'static Def) -> bool {
 
 /// May evaluating `n` reach an operator with an effect? (Conservative: anything not understood counts.)
 fn impure(n: N, seen: &mut HashSet<usize>) -> bool {
+    let r = impure0(n, seen);
+    if r && std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
+        if let E::App { name, r, sel, .. } = &n.e {
+            eprintln!("  (may have an effect, or is not understood: {}{}{} at line {})", name, if sel.is_some() { " with a selector" } else { "" }, match r.get() { Res::Def(d) => format!(" of module {}{}", d.module, if d.inst.is_some() { " (instance)" } else { "" }), Res::Decl(_) => " (substituted declaration)".into(), _ => String::new() }, n.loc[0]);
+        }
+    }
+    r
+}
+fn impure_def(d: &'static Def, seen: &mut HashSet<usize>) -> bool {
+    let d = d.over.get().unwrap_or(d);
+    if !seen.insert(d as *const Def as usize) {
+        return false;
+    }
+    if let Some(bi) = d.builtin.get() {
+        // a value given by the configuration is as pure as an operator of the standard modules
+        return !(pure_builtin(d) || matches!(bi.f, BFn::Const(_) | BFn::Table(..)));
+    }
+    if let Some(inst) = &d.inst {
+        // a definition of an instantiated module: the original and what is substituted into it
+        return impure_def(inst.orig, seen) || inst.substs.iter().any(|s| impure(s.e, seen));
+    }
+    match d.body.get() {
+        Some(b) => impure(b, seen),
+        None => true,
+    }
+}
+fn impure0(n: N, seen: &mut HashSet<usize>) -> bool {
     if let E::App { r, sel, .. } = &n.e {
         if sel.is_some() {
             return true;
         }
         match r.get() {
             Res::Def(d) => {
-                let d = d.over.get().unwrap_or(d);
-                if seen.insert(d as *const Def as usize) {
-                    if d.builtin.get().is_some() {
-                        if !pure_builtin(d) {
-                            if std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
-                                eprintln!("not compiled: builtin {} of module {}", d.name, d.module);
-                            }
-                            return true;
-                        }
-                    } else if d.inst.is_some() {
-                        return true;
-                    } else if let Some(b) = d.body.get() {
-                        if impure(b, seen) {
-                            return true;
-                        }
-                    } else {
-                        return true;
-                    }
+                if impure_def(d, seen) {
+                    return true;
                 }
             }
             Res::Decl(d) => {
-                if d.subst.get().is_some() {
-                    return true;
+                // a constant the configuration replaces by a definition
+                if let Some(sd) = d.subst.get() {
+                    if impure_def(sd, seen) {
+                        return true;
+                    }
                 }
             }
             Res::Local => {}
