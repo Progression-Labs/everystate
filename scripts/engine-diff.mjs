@@ -7,6 +7,7 @@
 //                                     [--timeout SEC] [--max-runtime SEC] [--filter STR] [--env K=V ...]
 //   SIDE    a path to an everystate binary, or `engine:NAME` (this build with EVERYSTATE_ENGINE=NAME),
 //           or `env:K=V` (this build with that variable set)
+//           or `flags:-workers 4` (this build with extra command-line flags)
 //   corpus  examples  the tlaplus/Examples models of the conformance gate (manifest.json, exhaustive search)
 //           bench     the 12 BENCHMARK.md models
 //           tlc       every (spec, cfg) pair of TLC's test-model directory
@@ -29,6 +30,7 @@ const extraEnv = {};
 args.forEach((a, i) => { if (a === '--env') { const [k, ...v] = args[i + 1].split('='); extraEnv[k] = v.join('='); } });
 const side = s => {
   if (!s) throw new Error('--a and --b are required');
+  if (s.startsWith('flags:')) return { bin: BIN, env: {}, flags: s.slice(6).split(' ').filter(Boolean), name: s };
   if (s.startsWith('engine:')) return { bin: BIN, env: { EVERYSTATE_ENGINE: s.slice(7) }, name: s };
   if (s.startsWith('env:')) { const [k, ...v] = s.slice(4).split('='); return { bin: BIN, env: { [k]: v.join('=') }, name: s }; }
   return { bin: path.resolve(s), env: {}, name: s };
@@ -71,7 +73,7 @@ for (const c of opt('--corpus', 'examples,bench').split(',')) {
 const todo = cases.filter(c => !filter || path.join(c.cwd, c.cfg).includes(filter));
 
 const run = (s, c, json) => new Promise(res => {
-  const p = spawn(s.bin, [...c.flags, ...(json ? ['-json'] : []), '-config', c.cfg, c.spec], { cwd: c.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...extraEnv, ...s.env } });
+  const p = spawn(s.bin, [...(s.flags ?? []), ...c.flags, ...(json ? ['-json'] : []), '-config', c.cfg, c.spec], { cwd: c.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...extraEnv, ...s.env } });
   let o = '', e = '';
   p.stdout.on('data', d => { if (o.length < 64e6) o += d; });
   p.stderr.on('data', d => { if (e.length < 4e6) e += d; });
@@ -83,7 +85,7 @@ const scrub = s => s
   .replace(/^step-cache estimate[^\n]*\n(  [^\n]*\n)*/gm, '') // the table EVERYSTATE_CACHE_STATS=1 adds to stderr
   .replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)')
   .replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T')
-  .replace(/Finished in [^\n]*/g, 'Finished in D')
+  .replace(/Finished in [^\n]*/g, 'Finished in D').replace(/with \d+ workers? on \d+ cores/g, 'with N workers on N cores')
   .replace(/\(\d[\d,]* s\/min, \d[\d,]* ds\/min\)/g, '(RATE)')
   .replace(/"(ms|elapsedMs|durationMs|seconds)":\s*[\d.]+/g, '"$1":0')
   .replace(/in \d+(\.\d+)?\s?(ms|s|min)\b/g, 'in D');

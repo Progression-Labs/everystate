@@ -16,6 +16,7 @@ const here = path.resolve(import.meta.dirname, '..');
 const BIN = path.join(here, 'target/release/everystate');
 const side = s => {
   if (!s) throw new Error('--a and --b are required');
+  if (s.startsWith('flags:')) return { bin: BIN, env: {}, flags: s.slice(6).split(' ').filter(Boolean), name: s };
   if (s.startsWith('engine:')) return { bin: BIN, env: { EVERYSTATE_ENGINE: s.slice(7) }, name: s };
   if (s.startsWith('env:')) { const [k, ...v] = s.slice(4).split('='); return { bin: BIN, env: { [k]: v.join('=') }, name: s };
   }
@@ -140,9 +141,9 @@ function plainSpec(r, name) {
   return { tla: lines.join('\n') + '\n', cfg: cfg.join('\n') + '\n', flags: r.chance(0.5) ? ['-deadlock'] : [] };
 }
 
-const scrub = s => s.replace(/^step-cache estimate[^\n]*\n(  [^\n]*\n)*/gm, '').replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)').replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T').replace(/Finished in [^\n]*/g, 'Finished in D');
+const scrub = s => s.replace(/^step-cache estimate[^\n]*\n(  [^\n]*\n)*/gm, '').replace(/\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)/g, '(T)').replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/g, 'T').replace(/Finished in [^\n]*/g, 'Finished in D').replace(/with \d+ workers? on \d+ cores/g, 'with N workers on N cores');
 const run = (s, d, name, flags, json) => {
-  const r = spawnSync(s.bin, [...flags, ...(json ? ['-json'] : []), '-config', `${name}.cfg`, `${name}.tla`], { cwd: d, encoding: 'utf8', timeout, maxBuffer: 1 << 28, env: { ...process.env, ...s.env } });
+  const r = spawnSync(s.bin, [...(s.flags ?? []), ...flags, ...(json ? ['-json'] : []), '-config', `${name}.cfg`, `${name}.tla`], { cwd: d, encoding: 'utf8', timeout, maxBuffer: 1 << 28, env: { ...process.env, ...s.env } });
   return { o: scrub(r.stdout ?? ''), e: scrub(r.stderr ?? ''), code: r.status, timedOut: r.error?.code === 'ETIMEDOUT' };
 };
 let same = 0, skipped = 0;
