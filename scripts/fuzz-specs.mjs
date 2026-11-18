@@ -43,13 +43,19 @@ function actorSpec(r, name) {
   const dom = bag ? 'DOMAIN net' : 'net';
   const empty = bag ? 'EmptyBag' : '{}';
   // (the first applies st outside its domain: an evaluation error part of the way through a state's successors)
-  const upd = r.chance(0.08) ? '@ + st[m.val]' : r.pick(['(@ + m.val) % K', 'IF m.val > @ THEN m.val ELSE @', 'm.val', '(@ + 1) % K']);
+  const upd = r.chance(0.08) ? '@ + st[m.val]' : r.pick(['(@ + m.val) % K', 'IF m.val > @ THEN m.val ELSE @', 'm.val', '(@ + 1) % K',
+    // a higher-order operator, a LAMBDA, LET inside a callee, an instantiated module, a function constructor applied at once, a recursive operator
+    'Apply(Inc, @)', 'Apply(LAMBDA v : (v + m.val) % K, @)', 'Clamp(@ + m.val)', 'A!Next2(@)', '[i \\in 1..2 |-> (@ + i) % K][2]', 'Sum({@, m.val}) % K']);
   const reply = r.chance(0.5);
   const viaOp = r.chance(0.5); // state update through an operator with delayed arguments
   const letForm = r.chance(0.4);
   const lines = [];
   lines.push(`---- MODULE ${name} ----`, 'EXTENDS Naturals, Bags, FiniteSets, Sequences, TLC', 'CONSTANTS K, Faults, Sends',
     `Reps == {${reps.join(', ')}}`, 'Other(x) == CHOOSE o \\in Reps : o # x',
+    'RECURSIVE Sum(_)', 'Sum(S) == IF S = {} THEN 0 ELSE LET x == CHOOSE y \\in S : TRUE IN x + Sum(S \\ {x})',
+    'Apply(F(_), v) == F(v)', 'Inc(v) == (v + 1) % K', 'Becomes(old, new) == new = old + 1',
+    'Clamp(v) == LET w == v % K  twice == w + w IN IF twice >= K THEN w ELSE twice % K',
+    'A == INSTANCE FuzzAux WITH Modulus <- K',
     'VARIABLES st, seen, net, sent, faults, log', 'vars == <<st, seen, net, sent, faults, log>>',
     `Init == /\\ st = [x \\in Reps |-> 0] /\\ seen = [x \\in Reps |-> {}] /\\ net = ${empty}`,
     '        /\\ sent = [x \\in Reps |-> 0] /\\ faults = 0 /\\ log = <<>>',
@@ -80,7 +86,7 @@ function actorSpec(r, name) {
     '  /\\ UNCHANGED <<sent, faults>>',
     'Lose(m) ==',
     `  /\\ faults < Faults /\\ ${has}`,
-    `  /\\ net' = ${take} /\\ faults' = faults + 1`,
+    r.chance(0.5) ? `  /\\ net' = ${take} /\\ faults' = faults + 1` : `  /\\ net' = ${take} /\\ Becomes(faults, faults')`, // a prime inside a callee
     '  /\\ UNCHANGED <<st, seen, sent, log>>',
     'Restart(x) ==',
     '  /\\ faults < Faults /\\ faults\' = faults + 1',
@@ -90,7 +96,8 @@ function actorSpec(r, name) {
   lines.push('Next == \\/ \\E x \\in Reps : Send(x) \\/ Restart(x)',
     `        \\/ \\E m \\in ${dom} : Deliver(m) \\/ Lose(m)${dup ? ' \\/ Dup(m)' : ''}`);
   const invs = ['\\A x \\in Reps : st[x] < K', `\\A x \\in Reps : Cardinality(seen[x]) <= ${1 + r.int(2)}`, `Len(log) < ${1 + r.int(2)}`,
-    `net # ${empty} \\/ \\A x, y \\in Reps : st[x] = st[y]`, `faults < ${1 + r.int(3)}`, `\\A x \\in Reps : st[x] # ${r.int(K)}`];
+    `net # ${empty} \\/ \\A x, y \\in Reps : st[x] = st[y]`, `faults < ${1 + r.int(3)}`, `\\A x \\in Reps : st[x] # ${r.int(K)}`,
+    `Sum(UNION {seen[x] : x \\in Reps}) < ${K + 2}`, '\\A x \\in Reps : seen[x] \\subseteq 0..K', '{x \\in Reps : st[x] > 0} # Reps', '[x \\in Reps |-> st[x]] = st'];
   lines.push(`Inv == ${r.pick(invs)}`, 'Bound == faults <= 1', 'View == <<st, net, sent, faults>>',
     'Step == [][faults\' >= faults]_vars', '====');
   const cfg = ['CONSTANTS', `  K = ${K}`, `  Faults = ${faults}`, `  Sends = ${sends}`, 'INIT Init', 'NEXT Next'];
@@ -155,6 +162,7 @@ for (let i = 0; i < N; i++) {
   fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(d, `${name}.tla`), spec.tla);
   fs.writeFileSync(path.join(d, `${name}.cfg`), spec.cfg);
+  fs.writeFileSync(path.join(d, 'FuzzAux.tla'), '---- MODULE FuzzAux ----\nEXTENDS Naturals\nCONSTANT Modulus\nWrap(v) == v % Modulus\nNext2(v) == Wrap(v + 2)\n====\n');
   let verdict = '';
   for (const json of [true, false]) {
     const [x, y] = [run(A, d, name, spec.flags, json), run(B, d, name, spec.flags, json)];
