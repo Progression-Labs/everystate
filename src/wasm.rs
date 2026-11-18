@@ -110,6 +110,49 @@ pub unsafe extern "C" fn es_simulate(root: *mut u8, root_len: usize, cfg: *mut u
     })
 }
 
+/// Translates the PlusCal algorithm in the text of a module (no file access). `opts`: the
+/// translator's command-line options, one per line. Returns a pointer to a JSON object
+/// `{"output": text or null, "messages": [...]}`; its length is `es_result_len()`.
+#[no_mangle]
+pub unsafe extern "C" fn es_pcal(src: *mut u8, src_len: usize, opts: *mut u8, opts_len: usize) -> *const u8 {
+    let (source, opts) = (take_str(src, src_len), take_str(opts, opts_len));
+    let options: Vec<String> = opts.split('\n').filter(|o| !o.is_empty()).map(|o| o.to_string()).collect();
+    let (output, messages) = crate::pcal::trans::translate_text(&source, &options);
+    let mut json = String::from("{\"output\":");
+    match &output {
+        Some(t) => json_string(t, &mut json),
+        None => json.push_str("null"),
+    }
+    json.push_str(",\"messages\":[");
+    for (i, m) in messages.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json_string(m, &mut json);
+    }
+    json.push_str("]}");
+    RESULT.with(|r| {
+        *r.borrow_mut() = json.into_bytes();
+        r.borrow().as_ptr()
+    })
+}
+
+fn json_string(s: &str, o: &mut String) {
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+}
+
 #[no_mangle]
 pub extern "C" fn es_result_len() -> usize {
     RESULT.with(|r| r.borrow().len())

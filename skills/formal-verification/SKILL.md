@@ -36,9 +36,12 @@ npx everystate -json Spec.tla                 # one JSON object on the last line
 The JSON object has `status` (`ok`, `invariant`, `liveness`, `deadlock`, ...), the state counts, and
 on a failure `name` and `trace`: the shortest list of `{action, state}` steps that reaches it.
 
-Not supported: simulation mode, multiple workers, the PlusCal translator (write TLA+ directly, or
-translate with the TLA+ tools first), TLAPS proofs. A model must be finite and small enough to
-enumerate; a few million states is fine.
+Also available: `everystate pcal Spec.tla` translates a PlusCal algorithm in the module (same output
+as the Java translator), and `everystate -simulate num=10000 Spec.tla` checks random behaviours
+when a model is too large to enumerate (a pass then covers only the behaviours generated).
+
+Not supported: multiple workers, TLAPS proofs. Exhaustive checking needs a model that is finite and
+small enough to enumerate; a few million states is fine.
 
 ## How to do it
 

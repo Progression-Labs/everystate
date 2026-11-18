@@ -107,6 +107,48 @@ export function check(input) {
   return { result, model: { vars: vars.map(name => ({ name })) } };
 }
 
+const PCAL_FLAGS = ['label', 'termination', 'noDoneDisjunct', 'reportLabels'];
+
+/**
+ * Translate the PlusCal algorithm in the text of a module to TLA+, as `java pcal.trans` does (same
+ * output, including the checksums in the BEGIN TRANSLATION line). Pure: nothing is read or written.
+ * @param {string} source the text of the module
+ * @param {string[] | {fairness?: 'wf'|'sf'|'wfNext'|'nof', label?: boolean, labelRoot?: string, termination?: boolean, noDoneDisjunct?: boolean, lineWidth?: number, version?: string}} [options]
+ *   the translator's command-line options (e.g. `['-wf', '-termination']`) or their object form
+ * @returns {{output: string | null, errors: string[], messages: string[]}} the new text of the module
+ *   (lines end with "\n"), or `null` with the reasons in `errors`
+ */
+export function translatePlusCal(source, options = []) {
+  let opts = options;
+  if (!Array.isArray(options)) {
+    opts = [];
+    if (options.fairness) opts.push(`-${options.fairness}`);
+    for (const f of PCAL_FLAGS) if (options[f]) opts.push(`-${f}`);
+    if (options.labelRoot !== undefined) opts.push('-labelRoot', String(options.labelRoot));
+    if (options.lineWidth !== undefined) opts.push('-lineWidth', String(options.lineWidth));
+    if (options.version !== undefined) opts.push('-version', String(options.version));
+  }
+  let memory;
+  const instance = new WebAssembly.Instance(load(), { env: { es_print: () => {}, es_now: () => Date.now() } });
+  const ex = instance.exports;
+  memory = ex.memory;
+  const put = s => {
+    const b = enc.encode(s);
+    const p = ex.es_alloc(b.length);
+    new Uint8Array(memory.buffer, p, b.length).set(b);
+    return [p, b.length];
+  };
+  const p = ex.es_pcal(...put(String(source)), ...put(opts.join('\n')));
+  const json = JSON.parse(dec.decode(new Uint8Array(memory.buffer, p, ex.es_result_len())));
+  const errors = [];
+  for (const m of json.messages) {
+    const e = /^\nUnrecoverable error:\n -- ([^]*)\.\n$/.exec(m);
+    if (e) errors.push(e[1]);
+  }
+  if (json.output === null && errors.length === 0) errors.push(json.messages.join('\n') || 'The translation failed.');
+  return { output: json.output, errors, messages: json.messages };
+}
+
 /**
  * Trace conformance: is a recorded run of the real system a behaviour of the specification?
  * `trace` is JSON Lines text, the text of a JSON array, or an array of observation objects

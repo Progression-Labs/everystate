@@ -28,6 +28,7 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
 - Random simulation (`-simulate`) for models too large to enumerate, with seeded, reproducible runs.
 - Trace conformance (`everystate conform`): check a log of the real system against the spec.
+- A PlusCal translator (`everystate pcal`) with the Java translator's output, byte for byte.
 - The standard and community modules are built in.
 - One native binary, or WebAssembly for Node, Bun and workers.
 
@@ -133,6 +134,38 @@ simulator also reports one when a `CONSTRAINT` excludes every successor), and a 
 given as `PROPERTY` is checked on the initial states (TLC's simulator skips it). Random choices
 differ from Java TLC's, so the same seed gives a different run there.
 
+## PlusCal
+
+`everystate pcal` translates the PlusCal algorithm in a module with the output of the Java
+translator (`pcal.trans` 1.12): the same TLA+, layout and checksums, the same `.old` backup and
+`.cfg` handling, the same options (`-wf`, `-sf`, `-wfNext`, `-nof`, `-termination`, `-label`,
+`-labelRoot`, `-lineWidth`, ... and the `PlusCal options (...)` line), in p-syntax and c-syntax.
+
+```tla
+---- MODULE Transfer ----
+EXTENDS Naturals, TLC
+
+(* --algorithm transfer
+variables alice = 10, bob = 10, money \in 1..20;
+begin
+  Withdraw: alice := alice - money;
+  Deposit:  bob := bob + money;
+  Check:    assert alice >= 0;
+end algorithm *)
+====
+```
+
+```sh
+everystate pcal Transfer.tla     # writes the translation into Transfer.tla, and Transfer.cfg
+everystate Transfer.tla          # "Failure of assertion at line 9, column 13."
+```
+
+When a module is model-checked and its algorithm or translation no longer matches the checksums
+in the `\* BEGIN TRANSLATION` line, everystate prints TLC's warning; `everystate pcal --check
+File.tla` reports the same without checking a model. From JavaScript,
+`translatePlusCal(source, options)` translates the text of a module. `-spec` and `-myspec` are not
+supported. `npm run conformance:pcal` compares the translator with the Java one.
+
 ## Check the code against the model
 
 A pass verifies the model. To check that the running code behaves like it, log what the code does
@@ -192,8 +225,7 @@ them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
 ## Not supported
 
 Multiple workers, disk-backed state storage (everything is in memory, so a few
-million distinct states is the practical limit), the PlusCal translator (already-translated specs
-work), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
+million distinct states is the practical limit), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
 are parsed and skipped).
 
 ## Development
