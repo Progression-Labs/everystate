@@ -176,7 +176,7 @@ fn run(root: &str, cfg_text: &str, deadlock: bool, sim: Option<crate::simulate::
         let out = crate::simulate::simulate(&model, &opts, &mut crate::simulate::NoSimEvents);
         return crate::simulate::sim_json(&model, &out, &opts, true);
     }
-    let (res, _checker) = crate::liveness::model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: false }, &mut NoEvents);
+    let (res, _checker) = crate::liveness::model_check(&model, CheckOptions { check_deadlock: deadlock && model.check_deadlock, record_graph: false, par: None }, &mut NoEvents);
     result_json(&model, &res, true)
 }
 

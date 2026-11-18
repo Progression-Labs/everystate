@@ -149,6 +149,7 @@ fn bag_n(v: &Value) -> i64 {
     }
 }
 fn possible_counts(ev: &Evaluator) -> Value {
+    worker_impure("the _POSSIBLE counters");
     ev.registers.borrow().get(&RegKey::Str(str_id("s:_possible"))).cloned().unwrap_or_else(empty_tuple)
 }
 fn bag_add(x: i64, y: i64) -> R<i64> {
@@ -478,6 +479,15 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         ev.st_touch.set(ev.st_touch.get() + 1); // never a constant: definitions using it must not be cached
         if let Value::Str(k) = &a[0] {
             let key = string(*k);
+            // the registers and the search statistics depend on the order of exploration
+            if !(matches!(&*key, "level" | "revision" | "spec") || key.starts_with("-D")) {
+                worker_impure("TLCGet");
+            }
+            // A specification that asks for the configuration (the number of workers, as a rule to
+            // assert that there is one) is searched with one worker, which is then what it is told.
+            if &*key == "config" {
+                crate::eval::WORKERS.store(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if key.starts_with("s:") {
                 return match ev.registers.borrow().get(&RegKey::Str(*k)) {
                     Some(v) => Ok(v.clone()),
@@ -500,12 +510,16 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
                 None => fail(format!("TLCGet({}) is not supported.", fmt(&a[0]))),
             };
         }
+        worker_impure("TLCGet");
         match ev.registers.borrow().get(&reg_key(&a[0], "TLCGet")?) {
             Some(v) => Ok(v.clone()),
             None => fail(format!("TLCGet({}) was undefined.", fmt(&a[0]))),
         }
     });
     m.op("TLCSet", 2, |ev, a| {
+        if worker_impure("TLCSet") {
+            return impure_err();
+        }
         if let Value::Str(k) = &a[0] {
             let key = string(*k);
             if key.starts_with("s:") {
@@ -619,6 +633,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         }
     });
     m.op("TLCModelValue", 1, |_, a| match &a[0] {
+        _ if worker_impure("TLCModelValue") => impure_err(),
         Value::Str(s) => Ok(Value::Model(model_value(&string(*s)))),
         v => Ok(Value::Model(model_value(&fmt(v)))),
     });
@@ -627,6 +642,7 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     m.op("TLCNoOp", 1, |_, a| Ok(a[0].clone()));
     // TLCCache(expr, closure): expr is evaluated once per (occurrence, closure value)
     m.op_lazy("TLCCache", 2, |ev, a| {
+        worker_impure("TLCCache");
         let node = match &a[0] {
             Value::Thunk(t) => t.e as *const crate::ast::Node as usize,
             _ => return ev.unthunk(&a[0]),
@@ -639,9 +655,15 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
         ev.tlc_cache.borrow_mut().insert(key, v.clone());
         Ok(v)
     });
-    m.op("TLCGetOrDefault", 2, |ev, a| Ok(ev.registers.borrow().get(&reg_key(&a[0], "TLCGetOrDefault")?).cloned().unwrap_or_else(|| a[1].clone())));
+    m.op("TLCGetOrDefault", 2, |ev, a| {
+        worker_impure("TLCGetOrDefault");
+        Ok(ev.registers.borrow().get(&reg_key(&a[0], "TLCGetOrDefault")?).cloned().unwrap_or_else(|| a[1].clone()))
+    });
     m.op_ops("TLCGetAndSet", 4, 0b10, |ev, a| {
         let key = reg_key(&a[0], "TLCGetAndSet")?;
+        if worker_impure("TLCGetAndSet") {
+            return impure_err();
+        }
         let old = ev.registers.borrow().get(&key).cloned().unwrap_or_else(|| a[3].clone());
         let nv = ev.apply_op(&a[1], &[old.clone(), a[2].clone()])?;
         ev.registers.borrow_mut().insert(key, nv);
@@ -904,7 +926,7 @@ fn tlc_get(ev: &Evaluator, k: &str) -> Option<Value> {
         ),
         "config" => make_record(
             &ids(&["mode", "depth", "deadlock", "worker", "traces", "seed", "fingerprint"]),
-            vec![mk_str("bfs"), Value::Int(-1), Value::Bool(st.check_deadlock.get()), Value::Int(1), Value::Int(0), Value::Int(0), Value::Int(0)],
+            vec![mk_str("bfs"), Value::Int(-1), Value::Bool(st.check_deadlock.get()), Value::Int(crate::eval::WORKERS.load(std::sync::atomic::Ordering::Relaxed) as i64), Value::Int(0), Value::Int(0), Value::Int(0)],
         ),
         "stats" => make_record(
             &ids(&["distinct", "generated", "queue", "diameter", "duration"]),

@@ -1,0 +1,14 @@
+ACP             main: med 0.36 min 0.34 s (load 2.3) | branch: med 0.36 min 0.35 s (load 2.3) ok 218352/54944/d21
+Stale           main: med 0.44 min 0.43 s (load 2.2) | branch: med 0.45 min 0.43 s (load 2.2) ok 111445/43348/d64
+Barriers        main: med 2.62 min 2.55 s (load 2.2) | branch: med 2.56 min 2.50 s (load 2.2) ok 104515/29279/d93
+SimpleRegular   main: med 4.36 min 4.31 s (load 2.1) | branch: med 4.45 min 4.33 s (load 2.1) ok 1454776/277726/d25
+Paxos           main: med 0.86 min 0.79 s (load 2.1) | branch: med 0.85 min 0.80 s (load 2.1) ok 13290/1207/d22
+VoteProof       main: med 7.17 min 6.98 s (load 2.0) | branch: med 7.37 min 7.12 s (load 2.0) ok 318877/6962/d14
+MCNanoMedium    main: med 18.93 min 18.59 s (load 2.0) | branch: med 19.08 min 18.17 s (load 2.0) ok 1120079/530587/d11
+MCBakery        main: med 10.01 min 9.94 s (load 2.0) | branch: med 10.08 min 10.06 s (load 2.0) ok 3403584/655200/d1
+MCLamportMutex  main: med 14.60 min 14.39 s (load 2.0) | branch: med 15.09 min 14.63 s (load 2.0) ok 2729079/724274/d61
+MCbtree         main: med 15.83 min 15.40 s (load 2.0) | branch: med 15.95 min 15.81 s (load 2.0) ok 2820091/374727/d38
+GameOfLife      main: med 12.17 min 11.90 s (load 2.0) | branch: med 12.76 min 12.45 s (load 2.0) ok 131072/65536/d1
+VoteProof       branch: med 7.32 min 7.20 s (load 1.9) | main: med 7.11 min 7.07 s (load 1.9) ok 318877/6962/d14
+MCLamportMutex  branch: med 14.76 min 14.61 s (load 2.0) | main: med 14.72 min 14.25 s (load 2.0) ok 2729079/724274/d61
+GameOfLife      branch: med 12.90 min 12.75 s (load 2.0) | main: med 12.63 min 12.00 s (load 2.0) ok 131072/65536/d1

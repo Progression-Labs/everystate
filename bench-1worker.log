@@ -1,0 +1,15 @@
+| model | distinct | generated | Rust s | Rust states/s | TS/Node states/s | TLC states/s | Rust vs Node | Rust vs Bun | Rust vs TLC | RSS Rust MB | RSS Node MB | counts agree |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| TCommit (tiny (startup)) | 34 | 94 | 0.01 | 16,894 | n/a | n/a | n/a | n/a | n/a | 13 | n/a | yes |
+| ACP_SB_TLC (sets, quantifiers) | 54944 | 218352 | 0.37 | 596,247 | n/a | n/a | n/a | n/a | n/a | 28 | n/a | yes |
+| StaleShrinkV6Wait2x (records) | 43348 | 111445 | 0.48 | 233,590 | n/a | n/a | n/a | n/a | n/a | 28 | n/a | yes |
+| Barriers (functions (PlusCal)) | 29279 | 104515 | 2.53 | 41,311 | n/a | n/a | n/a | n/a | n/a | 20 | n/a | yes |
+| SimpleRegular (functions (PlusCal)) | 277726 | 1454776 | 4.46 | 326,007 | n/a | n/a | n/a | n/a | n/a | 178 | n/a | yes |
+| Paxos (symmetry, sets of records) | 1207 | 13290 | 0.78 | 16,945 | n/a | n/a | n/a | n/a | n/a | 52 | n/a | yes |
+| VoteProof (set heavy, quantifiers) | 6962 | 318877 | 7.74 | 41,223 | n/a | n/a | n/a | n/a | n/a | 16 | n/a | yes |
+| MCNanoMedium (VIEW, records, sets) | 530587 | 1120079 | 19.14 | 58,505 | n/a | n/a | n/a | n/a | n/a | 616 | n/a | yes |
+| MCBakery (functions (PlusCal)) | 655200 | 3403584 | 10.23 | 332,805 | n/a | n/a | n/a | n/a | n/a | 213 | n/a | yes |
+| MCLamportMutex (functions of sequences) | 724274 | 2729079 | 14.65 | 186,279 | n/a | n/a | n/a | n/a | n/a | 532 | n/a | yes |
+| MCbtree (function / set heavy) | 374727 | 2820091 | 16.05 | 175,740 | n/a | n/a | n/a | n/a | n/a | 193 | n/a | yes |
+| GameOfLife (recursive operators, functions) | 65536 | 131072 | 12.81 | 10,234 | n/a | n/a | n/a | n/a | n/a | 40 | n/a | yes |
+
