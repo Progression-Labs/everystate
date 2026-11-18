@@ -65,7 +65,7 @@ const engines = {
   tlc: (cfg, spec, w) => {
     const meta = fs.mkdtempSync(path.join(os.tmpdir(), 'tlc-meta-'));
     const env = { ...process.env }; delete env.JAVA_TOOL_OPTIONS;
-    const r = timed('java', ['-XX:+UseParallelGC', `-DTLA-Library=${TLA_LIBRARY}`, '-cp', TLA2TOOLS, 'tlc2.TLC', '-workers', String(w), '-metadir', meta,
+    const r = timed('java', ['-XX:+UseParallelGC', '-Xmx3g', `-DTLA-Library=${TLA_LIBRARY}`, '-cp', TLA2TOOLS, 'tlc2.TLC', '-workers', String(w), '-metadir', meta,
       '-config', path.join(EXAMPLES, cfg), path.basename(spec)], { cwd: path.dirname(path.join(EXAMPLES, spec)), env });
     fs.rmSync(meta, { recursive: true, force: true });
     const m = /(\d+) states generated, (\d+) distinct states found/.exec(r.out);
