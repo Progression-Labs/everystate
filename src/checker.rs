@@ -818,8 +818,8 @@ impl<'a> Checker<'a> {
             ev.call_depth.set(0);
             ev.n_assigned.set(0);
             let mut found = || {
-                for k in 0..n {
-                    if nxt.is_undef(k) {
+                if !nxt.all_defined(n) {
+                    {
                         let missing = self.missing(&nxt);
                         let which = if actions.len() == 1 { "the next-state action".to_string() } else { format!("action {} of the next-state relation", a.name) };
                         return Err(Box::new(Fail::Check {

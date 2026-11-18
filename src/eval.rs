@@ -62,6 +62,33 @@ impl StateData {
         }
         drop(old);
     }
+    /// Every listed variable is unassigned here and assigned in `src`.
+    #[inline]
+    pub fn can_fill(&self, src: &StateData, idxs: &[u32]) -> bool {
+        // SAFETY: as in `get`: shared reads that do not outlive this call.
+        let (d, s) = unsafe { (&*self.vals.get(), &*src.vals.get()) };
+        idxs.iter().all(|&i| {
+            let i = i as usize;
+            i < d.len() && i < s.len() && matches!(d[i], Value::Undef) && !matches!(s[i], Value::Undef)
+        })
+    }
+    /// Copies the listed variables from `src` (after `can_fill`: the slots written are unassigned, so no
+    /// value is dropped while the vector is borrowed, and `src` is another state).
+    #[inline]
+    pub fn fill(&self, src: &StateData, idxs: &[u32]) {
+        debug_assert!(!std::ptr::eq(self, src));
+        // SAFETY: single-threaded; `self` and `src` are different states, `clone` cannot re-enter.
+        let (d, s) = unsafe { (&mut *self.vals.get(), &*src.vals.get()) };
+        for &i in idxs {
+            d[i as usize] = s[i as usize].clone();
+        }
+    }
+    /// All of the first `n` variables are assigned.
+    #[inline]
+    pub fn all_defined(&self, n: usize) -> bool {
+        let v = unsafe { &*self.vals.get() };
+        v.len() >= n && v[..n].iter().all(|x| !matches!(x, Value::Undef))
+    }
     /// Resets variable `i` to unassigned.
     #[inline]
     pub fn clear(&self, i: usize) {
@@ -2816,6 +2843,26 @@ impl Evaluator {
             if plain {
                 let nxt = self.nxt.borrow().as_ref().unwrap().clone();
                 let cur = self.cur.borrow().clone();
+                let ids = &idxs[..items.len()];
+                // Nearly always: distinct variables, none assigned yet, all defined. Copy them over in one go.
+                let mut seen: u64 = 0;
+                let distinct = ids.iter().all(|&i| {
+                    let fresh = i < 64 && seen & (1 << i) == 0;
+                    seen |= 1 << (i & 63);
+                    fresh
+                });
+                if distinct && !Rc::ptr_eq(&nxt, &cur) && nxt.can_fill(&cur, ids) {
+                    nxt.fill(&cur, ids);
+                    drop(cur);
+                    self.st_touch.set(self.st_touch.get() + ids.len() as u64);
+                    self.n_assigned.set(self.n_assigned.get() + ids.len() as i64);
+                    let r = k();
+                    for &i in ids.iter().rev() {
+                        nxt.clear(i as usize);
+                    }
+                    self.n_assigned.set(self.n_assigned.get() - ids.len() as i64);
+                    return r;
+                }
                 let mut set: u32 = 0; // the items assigned here
                 let mut r: R<()> = Ok(());
                 let mut go_on = true;
