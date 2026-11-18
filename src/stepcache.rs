@@ -156,7 +156,7 @@ impl Table {
         let i = (h as usize) & self.mask;
         let old = self.slots[i].as_ref().map_or(0, |b| b.1);
         // no entry may take more than a small share of the table, and the total stays within the budget
-        if size > 16 * 1024 || self.used - old + size > self.budget {
+        if size > 4 * 1024 || self.used - old + size > self.budget {
             self.n.too_big += 1;
             return;
         }

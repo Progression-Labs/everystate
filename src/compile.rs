@@ -421,7 +421,12 @@ pub struct UnitStat {
     loc: Loc4,
     lookups: Cell<u64>,
     hits: Cell<u64>,
+    /// hits at the start of the current window
+    mark: Cell<u64>,
+    /// the last window failed (the unit is backing off, or trying again after backing off)
     off: Cell<bool>,
+    skip: Cell<u64>,
+    penalty: Cell<u64>,
 }
 type Loc4 = [u32; 4];
 
@@ -1780,7 +1785,7 @@ impl Comp {
         let clear = self.cache_slots.clone();
         let id = (self.plan_id << 16) | self.units;
         self.units += 1;
-        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false) });
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), mark: Cell::new(0), off: Cell::new(false), skip: Cell::new(0), penalty: Cell::new(0) });
         self.unit_stats.push(stat.clone());
         Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
     }
@@ -2127,9 +2132,15 @@ fn bound_eq(vals: &[Value], cx: &Cx, bound: &[usize]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], clear: &[usize], inner: &AE, stat: &UnitStat, n: N) -> R<()> {
     let table = match cx.cache {
-        Some(t) if !stat.off.get() && !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
+        Some(t) if !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
         _ => return inner(cx, k),
     };
+    let skip = stat.skip.get();
+    if skip > 0 {
+        // backing off: evaluated without the cache
+        stat.skip.set(skip - 1);
+        return inner(cx, k);
+    }
     let nv = cx.nv as usize;
     let mut h0 = sc_::mix(0x5EED, id as u64);
     for &s in bound {
@@ -2140,6 +2151,24 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     }
     let lookups = stat.lookups.get() + 1;
     stat.lookups.set(lookups);
+    // Back-off: a miss costs more than an evaluation without the cache (the reads are noted and an entry
+    // is built), so a unit pays only at a high hit rate. Each window of 4096 lookups is judged on its own:
+    // the first (the table is cold) must reach 50 %, every later one 90 %. A unit that fails is evaluated
+    // without the cache for a while, twice as long each time it fails again (up to a million evaluations),
+    // so that a unit that never hits spends at most a few per cent of its evaluations finding that out.
+    if lookups % 4096 == 0 {
+        let hits = stat.hits.get();
+        let window = hits - stat.mark.replace(hits);
+        if window * 10 < 4096 * if lookups == 4096 { 5 } else { 9 } {
+            let p = (stat.penalty.get() * 2).clamp(16 * 4096, 1 << 20);
+            stat.penalty.set(p);
+            stat.skip.set(p);
+            stat.off.set(true);
+        } else {
+            stat.penalty.set(0);
+            stat.off.set(false);
+        }
+    }
     // 1. an entry whose unit, bound values and reads all match this state
     let hit: Option<Vec<Value>> = cx.cur.with(|cv| {
         let t = table.borrow();
@@ -2249,7 +2278,9 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
                     locs.push(loc.clone());
                 }
             }
-            if locs.len() > 24 {
+            // A large value read whole makes a poor key: it rarely recurs, and comparing it costs as much
+            // as the evaluation saved. Such an evaluation is not stored (and its unit soon backs off).
+            if locs.len() > 24 || rec.reads.iter().any(|(_, v)| sc_::vsize(v) > 512) {
                 return false;
             }
             let mut h1 = h0;
@@ -2269,10 +2300,6 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     }
     if !stored {
         t.n.uncacheable += 1;
-    }
-    // a unit that almost never hits is evaluated without the cache from then on
-    if lookups == 4096 && stat.hits.get() * 8 < lookups {
-        stat.off.set(true);
     }
     r
 }
@@ -2506,7 +2533,7 @@ impl Plans {
             let t = t.borrow();
             let off = self.units.iter().filter(|u| u.off.get()).count();
             cache = format!(
-                "step cache: budget {:.1} MB, in use {:.1} MB (peak {:.1} MB); {} units, {} switched off for a low hit rate; {} lookups, {} hits ({:.2}%), {} stored, {} replaced, {} not stored for size, {} evaluations not cacheable\n",
+                "step cache: budget {:.1} MB, in use {:.1} MB (peak {:.1} MB); {} units, {} backing off for a low hit rate; {} lookups, {} hits ({:.2}%), {} stored, {} replaced, {} not stored for size, {} evaluations not cacheable\n",
                 t.budget as f64 / 1048576.0,
                 t.used as f64 / 1048576.0,
                 t.peak as f64 / 1048576.0,
@@ -2522,7 +2549,7 @@ impl Plans {
             );
             if std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
                 for u in &self.units {
-                    cache += &format!("  unit at line {} col {}: {} lookups, {} hits{}\n", u.loc[0], u.loc[1], u.lookups.get(), u.hits.get(), if u.off.get() { " (switched off)" } else { "" });
+                    cache += &format!("  unit at line {} col {}: {} lookups, {} hits{}\n", u.loc[0], u.loc[1], u.lookups.get(), u.hits.get(), if u.off.get() { " (backing off)" } else { "" });
                 }
             }
         }
