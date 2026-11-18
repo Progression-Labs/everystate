@@ -13,6 +13,8 @@ pub struct StrId(pub u32);
 struct Interner {
     map: HashMap<Rc<str>, u32>,
     items: Vec<Rc<str>>,
+    /// content hash of each item (strings only: see `str_hash`)
+    hashes: Vec<u64>,
 }
 impl Interner {
     fn get(&mut self, s: &str) -> u32 {
@@ -26,10 +28,24 @@ impl Interner {
         i
     }
 }
+/// 64-bit hash of the bytes of a string (FNV-1a, then a multiply-xorshift finalizer).
+fn content_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    h
+}
 
 thread_local! {
     static NAMES: RefCell<Interner> = RefCell::new(Interner::default());
     static STRS: RefCell<Interner> = RefCell::new(Interner::default());
+    /// The `hashes` table of STRS (pointer, length), refreshed whenever a string is interned: fingerprinting
+    /// reads a string's content hash without borrowing the interner.
+    static STR_HASHES: std::cell::Cell<(*const u64, usize)> = const { std::cell::Cell::new((std::ptr::null(), 0)) };
 }
 
 pub fn name(s: &str) -> Name {
@@ -40,7 +56,27 @@ pub fn name_str(n: Name) -> Rc<str> {
 }
 /// Interns a TLA+ string; the id is its position in first-seen order.
 pub fn str_id(s: &str) -> StrId {
-    STRS.with(|n| StrId(n.borrow_mut().get(s)))
+    STRS.with(|n| {
+        let mut n = n.borrow_mut();
+        let id = n.get(s);
+        if n.hashes.len() < n.items.len() {
+            let h = content_hash(s);
+            n.hashes.push(h);
+            let t = (n.hashes.as_ptr(), n.hashes.len());
+            STR_HASHES.with(|c| c.set(t));
+        }
+        StrId(id)
+    })
+}
+/// Hash of the text of a string / model value: fingerprints depend on what a state contains, not on the
+/// order in which this thread happened to intern its strings.
+#[inline]
+pub fn str_hash(id: StrId) -> u64 {
+    let (p, len) = STR_HASHES.with(|c| c.get());
+    assert!((id.0 as usize) < len);
+    // SAFETY: the table lives in this thread's interner, is only appended to, and the pointer is refreshed
+    // after every append; the index was just checked.
+    unsafe { *p.add(id.0 as usize) }
 }
 pub fn str_of(id: StrId) -> Rc<str> {
     STRS.with(|t| t.borrow().items[id.0 as usize].clone())

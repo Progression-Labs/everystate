@@ -276,6 +276,55 @@ fn too_many_picks(picks: i64, n: i64, op: &str) -> R<()> {
     }
     Ok(())
 }
+/// `a (+) b` (plus) or `a (-) b` by one merge of the two sorted domains. None when a comparison or an
+/// addition fails: the caller then takes the general path, which reports the error as it always did.
+fn bag_merge(d0: &[Value], v0: &[Value], d1: &[Value], v1: &[Value], plus: bool) -> Option<Value> {
+    let mut dom: Vec<Value> = Vec::with_capacity(d0.len() + if plus { d1.len() } else { 0 });
+    let mut vals: Vec<Value> = Vec::with_capacity(dom.capacity());
+    let (mut i, mut j) = (0, 0);
+    let mut put = |d: &Value, n: i64, same: Option<&Value>| {
+        if n > 0 {
+            dom.push(d.clone());
+            vals.push(match same {
+                Some(v) => v.clone(),
+                None => Value::Int(n),
+            });
+        }
+    };
+    while i < d0.len() && j < d1.len() {
+        let c = match scalar_cmp(&d0[i], &d1[j]) {
+            Some(c) => c,
+            None => compare(&d0[i], &d1[j]).ok()?,
+        };
+        match c {
+            Ordering::Less => {
+                put(&d0[i], bag_n(&v0[i]), Some(&v0[i]));
+                i += 1;
+            }
+            Ordering::Greater => {
+                if plus {
+                    put(&d1[j], bag_n(&v1[j]), Some(&v1[j]));
+                }
+                j += 1;
+            }
+            Ordering::Equal => {
+                let n = if plus { bag_add(bag_n(&v0[i]), bag_n(&v1[j])).ok()? } else { bag_n(&v0[i]) - bag_n(&v1[j]) };
+                put(&d0[i], n, None);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    while i < d0.len() {
+        put(&d0[i], bag_n(&v0[i]), Some(&v0[i]));
+        i += 1;
+    }
+    while plus && j < d1.len() {
+        put(&d1[j], bag_n(&v1[j]), Some(&v1[j]));
+        j += 1;
+    }
+    Some(make_fcn_owned(dom, vals))
+}
 fn mk_bag(m: Vec<(Value, i64)>) -> R<Value> {
     make_fcn_from_pairs(m.into_iter().filter(|p| p.1 > 0).map(|(d, n)| (d, Value::Int(n))).collect())
 }
@@ -671,6 +720,9 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     m.val("EmptyBag", empty_tuple());
     m.op("\\oplus", 2, |_, a| {
         let ((d0, v0), (d1, v1)) = (bag_pairs(&a[0], "(+)")?, bag_pairs(&a[1], "(+)")?);
+        if let Some(v) = bag_merge(&d0, v0, &d1, v1, true) {
+            return Ok(v);
+        }
         let mut out: Vec<(Value, i64)> = d0.iter().zip(v0.iter()).map(|(d, v)| (d.clone(), bag_n(v))).collect();
         for i in 0..d1.len() {
             match bsearch(&d0, &d1[i])? {
@@ -682,6 +734,9 @@ pub fn build_stdlib() -> HashMap<Name, Rc<ModuleInfo>> {
     });
     m.op("\\ominus", 2, |_, a| {
         let ((d0, v0), (d1, v1)) = (bag_pairs(&a[0], "(-)")?, bag_pairs(&a[1], "(-)")?);
+        if let Some(v) = bag_merge(&d0, v0, &d1, v1, false) {
+            return Ok(v);
+        }
         let mut out = vec![];
         for i in 0..d0.len() {
             let n = match bsearch(&d1, &d0[i])? {

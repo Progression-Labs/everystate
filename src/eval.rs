@@ -432,6 +432,20 @@ pub struct Evaluator {
     enabled_mark: Name,
 }
 
+/// The index of the variable an expression names directly: a declared variable used outside any instance
+/// environment (where a substitution could stand for it). None for everything else.
+#[inline]
+fn plain_var(e: N, ctx: &C) -> Option<i64> {
+    if let E::App { args, sel, r, .. } = &e.e {
+        if let Res::Decl(d) = r.get() {
+            if d.is_var && d.idx.get() >= 0 && args.is_empty() && sel.is_none() && ctx.as_ref().map_or(true, |c| !c.env && c.base.is_none()) {
+                return Some(d.idx.get() as i64);
+            }
+        }
+    }
+    None
+}
+
 fn undefined_ident<T>(name: Name) -> R<T> {
     eval_err(format!("In evaluation, the identifier {} is either undefined or not an operator.", name))
 }
@@ -762,7 +776,23 @@ impl Evaluator {
                     res = self.expand_op(&b, &self.mk_args(args, ctx)?)?;
                 }
             },
-            Res::Def(d) => res = self.expand_def(d, &self.mk_args(args, ctx)?, &base_of(ctx))?,
+            Res::Def(d) => {
+                let dd = d.over.get().unwrap_or(d);
+                if dd.builtin.get().is_some() && sel.is_none() {
+                    // a builtin operator has no body to expand: do not build thunks for its arguments
+                    return Ok(None);
+                }
+                if dd.inst.is_none() && dd.params.len() == args.len() {
+                    // bind the parameters directly, without an intermediate argument vector
+                    let mut c = base_of(ctx);
+                    for (p, a) in dd.params.iter().zip(args.iter()) {
+                        c = cons(p.name, self.mk_arg(a, ctx)?, &c);
+                    }
+                    res = Some((dd.body.get().unwrap(), c));
+                } else {
+                    res = self.expand_def(d, &self.mk_args(args, ctx)?, &base_of(ctx))?;
+                }
+            }
             Res::Decl(d) => {
                 let base = base_of(ctx);
                 let b = if base.is_some() { self.env_lookup(&base, name) } else { None };
@@ -2254,6 +2284,9 @@ impl Evaluator {
     // ---------- action / initial-predicate enumeration ----------
     /// Resolve an expression to a variable index if it denotes a variable (possibly through substitutions).
     pub fn as_var(&self, e: N, ctx: &C) -> R<i64> {
+        if let Some(i) = plain_var(e, ctx) {
+            return Ok(i);
+        }
         let mut e = e;
         let mut ctx = ctx.clone();
         for _ in 0..100 {
@@ -2330,6 +2363,12 @@ impl Evaluator {
         }
         if self.nxt.borrow().is_none() || self.prime_depth.get() > 0 {
             return Ok(-1);
+        }
+        match &lhs.e {
+            E::Op(K::Prime, a) => return self.as_var(&a[0], ctx),
+            E::Let { .. } => {}
+            E::App { args, .. } if args.is_empty() => {}
+            _ => return Ok(-1),
         }
         // look through operator parameters bound to primed variables, e.g. Send(p, d, mem, mem')
         let mut lhs = lhs;
@@ -2611,6 +2650,53 @@ impl Evaluator {
 
     fn enum_unchanged(&self, e: N, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
         if let E::Op(K::Tuple, items) = &e.e {
+            // The usual shape, a tuple of variables: one pass instead of a continuation per variable.
+            if items.len() <= 64 && items.iter().all(|it| plain_var(it, ctx).is_some()) {
+                let nxt = self.nxt.borrow().as_ref().unwrap().clone();
+                let cur = self.cur.borrow().clone();
+                let mut set: u64 = 0; // the items assigned here
+                let mut r: R<()> = Ok(());
+                let mut go_on = true;
+                for (j, it) in items.iter().enumerate() {
+                    let idx = plain_var(it, ctx).unwrap() as usize;
+                    if nxt.is_undef(idx) {
+                        let v = cur.get(idx);
+                        self.st_touch.set(self.st_touch.get() + 1);
+                        if matches!(v, Value::Undef) {
+                            r = self.at_node(undefined_ident(self.var_names.borrow().get(idx).copied().unwrap_or(self.at)), it);
+                            go_on = false;
+                            break;
+                        }
+                        nxt.set(idx, v);
+                        self.n_assigned.set(self.n_assigned.get() + 1);
+                        set |= 1 << j;
+                    } else {
+                        match val_eq(&nxt.get(idx), &cur.get(idx)) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                go_on = false;
+                                break;
+                            }
+                            Err(e) => {
+                                r = Err(e);
+                                go_on = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                drop(cur);
+                if go_on {
+                    r = k();
+                }
+                for (j, it) in items.iter().enumerate().rev() {
+                    if set & (1 << j) != 0 {
+                        nxt.set(plain_var(it, ctx).unwrap() as usize, Value::Undef);
+                        self.n_assigned.set(self.n_assigned.get() - 1);
+                    }
+                }
+                return r;
+            }
             fn go(ev: &Evaluator, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
                 if i == items.len() {
                     return k();

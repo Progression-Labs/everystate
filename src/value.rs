@@ -960,6 +960,17 @@ impl FcnShape {
         }
         FcnShape::Fcn(Rc::new(dom.to_vec()))
     }
+    /// As `of`, taking the domain: a function that is neither a tuple nor a record keeps the vector.
+    pub fn of_owned(dom: Vec<Value>) -> FcnShape {
+        match dom.first() {
+            None => FcnShape::Empty,
+            Some(Value::Int(1)) | Some(Value::Str(_)) => match FcnShape::of(&dom) {
+                FcnShape::Fcn(_) => FcnShape::Fcn(Rc::new(dom)),
+                sh => sh,
+            },
+            _ => FcnShape::Fcn(Rc::new(dom)),
+        }
+    }
     pub fn make(&self, vals: Vec<Value>) -> Value {
         match self {
             FcnShape::Empty => empty_tuple(),
@@ -973,8 +984,28 @@ impl FcnShape {
 pub fn make_fcn(dom: &[Value], vals: Vec<Value>) -> Value {
     FcnShape::of(dom).make(vals)
 }
+/// As `make_fcn`, for a domain the caller no longer needs.
+pub fn make_fcn_owned(dom: Vec<Value>, vals: Vec<Value>) -> Value {
+    FcnShape::of_owned(dom).make(vals)
+}
 /// Build from unsorted pairs (the first of equal keys wins).
 pub fn make_fcn_from_pairs(mut pairs: Vec<(Value, Value)>) -> R<Value> {
+    // already strictly increasing (the usual case: pairs derived from a sorted domain): nothing to sort
+    let mut sorted = true;
+    for i in 1..pairs.len() {
+        let c = match scalar_cmp(&pairs[i - 1].0, &pairs[i].0) {
+            Some(c) => c,
+            None => compare(&pairs[i - 1].0, &pairs[i].0).unwrap_or(Ordering::Equal), // a failure is reported by the sort
+        };
+        if c != Ordering::Less {
+            sorted = false;
+            break;
+        }
+    }
+    if sorted {
+        let (dom, vals): (Vec<Value>, Vec<Value>) = pairs.into_iter().unzip();
+        return Ok(make_fcn_owned(dom, vals));
+    }
     try_sort_by(&mut pairs, |x, y| compare(&x.0, &y.0))?;
     let mut dom: Vec<Value> = Vec::with_capacity(pairs.len());
     let mut vals: Vec<Value> = Vec::with_capacity(pairs.len());
@@ -1044,14 +1075,76 @@ impl Hasher {
     /// Composite values are hashed once: the result is cached in the value and mixed into the enclosing
     /// hash as a single word (unchanged parts of a state are shared between states, so most of a state is
     /// never re-hashed).
+    #[inline]
     pub fn value(&mut self, v: &Value) -> R<()> {
-        match v {
-            Value::Int(i) => {
-                self.add(1 ^ ((*i as u64) << 4));
+        let w = value_word(v)?;
+        self.add(w);
+        Ok(())
+    }
+    #[inline]
+    pub fn finish(&self) -> u64 {
+        let mut h = self.h;
+        h ^= h >> 32;
+        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        h ^= h >> 32;
+        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        h ^= h >> 32;
+        h
+    }
+}
+/// The 64-bit word that stands for a value in a hash: a tagged scalar, or the (cached) hash of a composite.
+/// It depends only on the content of the value.
+#[inline]
+pub fn value_word(v: &Value) -> R<u64> {
+    Ok(match v {
+        Value::Int(i) => 1 ^ ((*i as u64) << 4),
+        Value::Bool(b) => {
+            if *b {
+                3
+            } else {
+                2
             }
-            Value::Bool(b) => self.add(if *b { 3 } else { 2 }),
-            Value::Str(s) => self.add(4 ^ ((s.0 as u64) << 4)),
-            Value::Model(m) => self.add(9 ^ ((m.0 as u64) << 4)),
+        }
+        Value::Str(s) => str_hash(*s).rotate_left(5) ^ 4,
+        Value::Model(m) => str_hash(*m).rotate_left(11) ^ 9,
+        Value::Tuple(t) => {
+            let c = t.h.get();
+            if c != 0 {
+                c
+            } else {
+                composite_word(v)?
+            }
+        }
+        Value::Record(r) => {
+            let c = r.h.get();
+            if c != 0 {
+                c
+            } else {
+                composite_word(v)?
+            }
+        }
+        Value::Fcn(f) => {
+            let c = f.h.get();
+            if c != 0 {
+                c
+            } else {
+                composite_word(v)?
+            }
+        }
+        _ => composite_word(v)?,
+    })
+}
+#[inline(never)]
+fn composite_word(v: &Value) -> R<u64> {
+    let mut hh = Hasher::new();
+    hh.composite(v)?;
+    Ok(hh.h)
+}
+impl Hasher {
+    /// Hashes a composite value once (the result is cached in the value) and leaves its word in `self.h`.
+    fn composite(&mut self, v: &Value) -> R<()> {
+        self.h = 0;
+        match v {
             Value::Tuple(t) => {
                 let mut c = t.h.get();
                 if c == 0 {
@@ -1063,7 +1156,7 @@ impl Hasher {
                     c = h.finish();
                     t.h.set(c);
                 }
-                self.add(c);
+                self.h = c;
             }
             Value::Record(r) => {
                 let mut c = r.h.get();
@@ -1071,13 +1164,13 @@ impl Hasher {
                     let mut h = Hasher::new();
                     h.add(6 ^ ((r.names.len() as u64) << 4));
                     for i in 0..r.names.len() {
-                        h.add(r.names[i].0 as u64);
+                        h.add(str_hash(r.names[i]));
                         h.value(&r.vals[i])?;
                     }
                     c = h.finish();
                     r.h.set(c);
                 }
-                self.add(c);
+                self.h = c;
             }
             Value::Set(s) => {
                 let mut c = s.h.get();
@@ -1100,7 +1193,7 @@ impl Hasher {
                     c = h.finish();
                     s.h.set(c);
                 }
-                self.add(c);
+                self.h = c;
             }
             Value::Fcn(f) => {
                 let mut c = f.h.get();
@@ -1114,21 +1207,11 @@ impl Hasher {
                     c = h.finish();
                     f.h.set(c);
                 }
-                self.add(c);
+                self.h = c;
             }
             _ => return eval_err("Attempted to fingerprint a non-value (operator or lazy function).".into()),
         }
         Ok(())
-    }
-    #[inline]
-    pub fn finish(&self) -> u64 {
-        let mut h = self.h;
-        h ^= h >> 32;
-        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-        h ^= h >> 32;
-        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-        h ^= h >> 32;
-        h
     }
 }
 
