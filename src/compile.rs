@@ -422,6 +422,8 @@ impl Comp {
                         ScK::Arg { node, sc: asc, .. } => self.operand_ok(node, asc),
                         _ => false,
                     },
+                    // a LET definition that cannot be a function constructor: the tree-walker evaluates it in full
+                    Found::Let(d, _) => matches!(&d.k, ScK::Let { d, .. } if d.params.is_empty()),
                     _ => false,
                 },
                 Res::Decl(d) => d.subst.get().is_none(),
@@ -1318,7 +1320,8 @@ impl Comp {
                     Res::None => fb_act(n, sc),
                 }
             }
-            // the enumerator enters the body of a lazily evaluated function
+            // the enumerator enters the body of a lazily evaluated function; a state variable is not one
+            E::FnApp { f, .. } if var_of(f).is_some() => self.guard(n, sc),
             E::FnApp { .. } => fb_act(n, sc),
             _ => self.guard(n, sc),
         }
