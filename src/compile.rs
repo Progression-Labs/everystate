@@ -82,14 +82,48 @@ fn build(sc: &Rc<Sc>, cx: &Cx) -> R<C> {
         ScK::Root(c) => c.clone(),
         ScK::Slot { name, slot } => cons(*name, cx.f.get(*slot), &below(cx)?),
         ScK::At { slot } => cons(cx.ev.at, cx.f.get(*slot), &below(cx)?),
-        ScK::Arg { name, node, sc: asc, .. } => {
-            let actx = build(asc, cx)?;
-            cons(*name, cx.ev.mk_arg(node, &actx)?, &below(cx)?)
+        ScK::Arg { name, node, sc: asc, bd } => {
+            // a value the compiled code already has is passed on instead of a thunk that would compute it again
+            let known = match bd {
+                ArgBd::Const(v) => Some(v.clone()),
+                ArgBd::ByName { cache: Some(slot), .. } => Some(cx.f.get(*slot)).filter(|v| !matches!(v, Value::Undef)),
+                _ => None,
+            };
+            let v = match known {
+                Some(v) => v,
+                None => cx.ev.mk_arg(node, &build(asc, cx)?)?,
+            };
+            cons(*name, v, &below(cx)?)
         }
         ScK::Let { root: true, .. } | ScK::RootVal { .. } => below(cx)?,
         ScK::Let { defs, below: b, head, .. } => {
             debug_assert!(*head);
-            cx.ev.bind_let(defs, &build(b, cx)?)
+            let ctx = cx.ev.bind_let(defs, &build(b, cx)?);
+            // likewise for the LET definitions already evaluated: their cells start out filled
+            let mut s = Some(sc);
+            while let Some(node) = s {
+                match &node.k {
+                    ScK::Let { d, cache, root: false, below: b2, .. } if Rc::ptr_eq(b2, b) => {
+                        let v = cx.f.get(*cache);
+                        if !matches!(v, Value::Undef) {
+                            let mut c = ctx.as_ref();
+                            while let Some(cn) = c {
+                                if cn.name == d.name {
+                                    if let Bind::LetLazy { v: cell, st, .. } = &cn.val {
+                                        *cell.borrow_mut() = v;
+                                        st.set(cx.cur.id);
+                                    }
+                                    break;
+                                }
+                                c = cn.next.as_ref();
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+                s = node.next.as_ref();
+            }
+            ctx
         }
     })
 }
@@ -370,6 +404,54 @@ fn lookup_at(sc: &Rc<Sc>) -> Option<usize> {
 fn push(sc: &Rc<Sc>, k: ScK) -> Rc<Sc> {
     Rc::new(Sc { k, next: Some(sc.clone()) })
 }
+/// Several bounds, several names per bound, tuple patterns: `\E x, y \in S, <<a, b>> \in T : ...`.
+struct Bnds {
+    sets: Vec<CE>,
+    /// one entry per bound name or tuple pattern, in the order written
+    flat: Vec<FlatB>,
+}
+struct FlatB {
+    set: usize,
+    slots: Vec<usize>,
+    tuple: bool,
+}
+impl Bnds {
+    /// Calls `f` for every binding, in the tree-walker's order (the first name varies fastest), until it
+    /// returns true; all the sets are evaluated and enumerated before the first binding.
+    fn each(&self, cx: &Cx, f: &mut dyn FnMut() -> R<bool>) -> R<bool> {
+        let mut sets: Vec<Rc<SetV>> = Vec::with_capacity(self.sets.len());
+        for s in &self.sets {
+            let s = as_set(s(cx)?)?;
+            s.elems()?;
+            sets.push(s);
+        }
+        fn rec(b: &Bnds, sets: &[Rc<SetV>], i: isize, cx: &Cx, f: &mut dyn FnMut() -> R<bool>) -> R<bool> {
+            if i < 0 {
+                return f();
+            }
+            let fb = &b.flat[i as usize];
+            for v in sets[fb.set].elems()? {
+                if fb.tuple {
+                    match v {
+                        Value::Tuple(t) if t.len() == fb.slots.len() => {
+                            for (j, &s) in fb.slots.iter().enumerate() {
+                                cx.f.set(s, t[j].clone());
+                            }
+                        }
+                        _ => return bail(),
+                    }
+                } else {
+                    cx.f.set(fb.slots[0], v.clone());
+                }
+                if rec(b, sets, i - 1, cx, f)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        rec(self, &sets, self.flat.len() as isize - 1, cx, f)
+    }
+}
 fn simple_bound(bounds: &'static [Bound]) -> Option<(Name, N)> {
     if bounds.len() != 1 {
         return None;
@@ -394,6 +476,34 @@ fn var_of(n: N) -> Option<usize> {
 }
 
 impl Comp {
+    /// The compiled bounds of a quantifier and the scope of its body. None when a bound has no set.
+    fn bounds(&mut self, bounds: &'static [Bound], sc: &Rc<Sc>) -> Option<(Bnds, Rc<Sc>)> {
+        if bounds.iter().any(|b| b.set.is_none() || (b.names.is_none() && b.tuple.is_none())) {
+            return None;
+        }
+        let mut sets = vec![];
+        let mut flat: Vec<(FlatB, Vec<Name>)> = vec![];
+        for (i, b) in bounds.iter().enumerate() {
+            sets.push(self.expr(b.set.as_ref().unwrap(), sc));
+            if let Some(t) = &b.tuple {
+                let slots = t.iter().map(|_| self.slot()).collect();
+                flat.push((FlatB { set: i, slots, tuple: true }, t.clone()));
+            } else {
+                for nm in b.names.as_ref().unwrap() {
+                    let s = self.slot();
+                    flat.push((FlatB { set: i, slots: vec![s], tuple: false }, vec![*nm]));
+                }
+            }
+        }
+        // the last name is the outermost loop, so it is bound first
+        let mut inner = sc.clone();
+        for (fb, names) in flat.iter().rev() {
+            for (j, nm) in names.iter().enumerate() {
+                inner = push(&inner, ScK::Slot { name: *nm, slot: fb.slots[j] });
+            }
+        }
+        Some((Bnds { sets, flat: flat.into_iter().map(|x| x.0).collect() }, inner))
+    }
     fn slot(&mut self) -> usize {
         self.nslots += 1;
         self.nslots - 1
@@ -682,7 +792,18 @@ impl Comp {
             E::Quant { forall, bounds, body } => {
                 let (nm, set) = match simple_bound(bounds) {
                     Some(x) => x,
-                    None => return self.fallback(n, sc),
+                    None => {
+                        let (b, inner) = match self.bounds(bounds, sc) {
+                            Some(x) => x,
+                            None => return self.fallback(n, sc),
+                        };
+                        let body = self.expr(body, &inner);
+                        let forall = *forall;
+                        return Box::new(move |cx| {
+                            let stopped = b.each(cx, &mut || Ok(truth(body(cx)?)? != forall))?;
+                            Ok(Value::Bool(stopped != forall))
+                        });
+                    }
                 };
                 let set = self.expr(set, sc);
                 let slot = self.slot();
@@ -762,7 +883,21 @@ impl Comp {
             E::SetMap { e, bounds } => {
                 let (nm, set) = match simple_bound(bounds) {
                     Some(x) => x,
-                    None => return self.fallback(n, sc),
+                    None => {
+                        let (b, inner) = match self.bounds(bounds, sc) {
+                            Some(x) => x,
+                            None => return self.fallback(n, sc),
+                        };
+                        let e = self.expr(e, &inner);
+                        return Box::new(move |cx| {
+                            let mut out: Vec<Value> = Vec::new();
+                            b.each(cx, &mut || {
+                                out.push(e(cx)?);
+                                Ok(false)
+                            })?;
+                            mk_set(out)
+                        });
+                    }
                 };
                 let set = self.expr(set, sc);
                 let slot = self.slot();
@@ -1421,7 +1556,20 @@ impl Comp {
             E::Quant { forall: false, bounds, body } => {
                 let (nm, set) = match simple_bound(bounds) {
                     Some(x) => x,
-                    None => return fb_act(n, sc),
+                    None => {
+                        let (b, inner) = match self.bounds(bounds, sc) {
+                            Some(x) => x,
+                            None => return fb_act(n, sc),
+                        };
+                        let body = self.act_inner(body, &inner);
+                        return Box::new(move |cx, k| {
+                            b.each(cx, &mut || {
+                                body(cx, &mut *k)?;
+                                Ok(false)
+                            })?;
+                            Ok(())
+                        });
+                    }
                 };
                 let set = self.expr(set, sc);
                 let slot = self.slot();
@@ -1570,10 +1718,34 @@ fn root_scope(ctx: &C, c: &mut Comp, seen: &mut HashSet<usize>) -> Option<(Rc<Sc
 pub struct ActPlan {
     run: AE,
     frame: StateRef,
+    use_: Usage,
 }
 pub struct PredPlan {
     run: CE,
     frame: StateRef,
+    use_: Usage,
+}
+/// Compiled code that mostly hands over to the tree-walker costs more than the tree-walker alone (a
+/// context is rebuilt for every fallback). Such a plan is switched off after a trial; the result is the
+/// same either way.
+#[derive(Default)]
+struct Usage {
+    runs: Cell<u32>,
+    fallbacks: Cell<u64>,
+    off: Cell<bool>,
+}
+impl Usage {
+    #[inline]
+    fn note(&self, fallbacks: u64) {
+        let r = self.runs.get();
+        if r < 512 {
+            self.runs.set(r + 1);
+            self.fallbacks.set(self.fallbacks.get() + fallbacks);
+            if r + 1 == 512 && self.fallbacks.get() > 4 * 512 {
+                self.off.set(true);
+            }
+        }
+    }
 }
 #[derive(Default)]
 pub struct Counters {
@@ -1622,7 +1794,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
                 body(cx, k)
             })
         };
-        actions.push(Some(ActPlan { run, frame: StateData::blank(c.nslots.max(1)) }));
+        actions.push(Some(ActPlan { run, frame: StateData::blank(c.nslots.max(1)), use_: Usage::default() }));
     }
     let mut invariants = vec![];
     for p in &model.invariants {
@@ -1637,7 +1809,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
             }
         };
         let run = with_clear(clear, c.expr(p.e, &root));
-        invariants.push(Some(PredPlan { run, frame: StateData::blank(c.nslots.max(1)) }));
+        invariants.push(Some(PredPlan { run, frame: StateData::blank(c.nslots.max(1)), use_: Usage::default() }));
     }
     Plans { actions, invariants, n: Counters::default(), blank: StateData::blank(model.vars.len()) }
 }
@@ -1648,14 +1820,16 @@ impl Plans {
     /// by the tree-walker after discarding what it produced.
     pub fn run_action(&self, ev: &Evaluator, ai: usize, cur: &StateData, nxt: &StateData, nv: usize, k: &mut dyn FnMut() -> R<()>) -> Option<R<()>> {
         let p = match &self.actions[ai] {
-            Some(p) => p,
-            None => {
+            Some(p) if !p.use_.off.get() => p,
+            _ => {
                 self.n.uncompiled.set(self.n.uncompiled.get() + 1);
                 return None;
             }
         };
         let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks };
+        let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx, k);
+        p.use_.note(self.n.fallbacks.get() - f0);
         if r.is_err() {
             self.n.redone.set(self.n.redone.get() + 1);
         } else {
@@ -1666,14 +1840,17 @@ impl Plans {
     /// The value of invariant `i` in `s` (the evaluator's current state), or None for the tree-walker to decide.
     pub fn run_invariant(&self, ev: &Evaluator, i: usize, s: &StateData, nv: usize) -> Option<bool> {
         let p = match &self.invariants[i] {
-            Some(p) => p,
-            None => {
+            Some(p) if !p.use_.off.get() => p,
+            _ => {
                 self.n.uncompiled.set(self.n.uncompiled.get() + 1);
                 return None;
             }
         };
         let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks };
-        match (p.run)(&cx) {
+        let f0 = self.n.fallbacks.get();
+        let r = (p.run)(&cx);
+        p.use_.note(self.n.fallbacks.get() - f0);
+        match r {
             Ok(Value::Bool(b)) => {
                 self.n.compiled.set(self.n.compiled.get() + 1);
                 Some(b)
