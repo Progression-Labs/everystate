@@ -19,7 +19,7 @@ generated and distinct state counts.
 `npm run conformance:tlc -- /path/to/test-model`
 
 Each model is run with live TLC and with everystate; outcome, state counts and trace length are
-compared. **384 of 414** match. 4 are skipped because TLC itself times out. `pcal/Detlefs` sits at
+compared. **383 of 414** match. 4 are skipped because TLC itself times out. `pcal/Detlefs` sits at
 the 60-second limit and can pass or time out.
 
 | Reason for mismatch | Count | Specs |
