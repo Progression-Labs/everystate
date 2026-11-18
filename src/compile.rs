@@ -2153,13 +2153,13 @@ fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], cle
     stat.lookups.set(lookups);
     // Back-off: a miss costs more than an evaluation without the cache (the reads are noted and an entry
     // is built), so a unit pays only at a high hit rate. Each window of 4096 lookups is judged on its own:
-    // the first (the table is cold) must reach 50 %, every later one 90 %. A unit that fails is evaluated
+    // the first (the table is cold) must reach 50 %, every later one 75 %. A unit that fails is evaluated
     // without the cache for a while, twice as long each time it fails again (up to a million evaluations),
     // so that a unit that never hits spends at most a few per cent of its evaluations finding that out.
     if lookups % 4096 == 0 {
         let hits = stat.hits.get();
         let window = hits - stat.mark.replace(hits);
-        if window * 10 < 4096 * if lookups == 4096 { 5 } else { 9 } {
+        if window * 20 < 4096 * if lookups == 4096 { 10 } else { 15 } {
             let p = (stat.penalty.get() * 2).clamp(16 * 4096, 1 << 20);
             stat.penalty.set(p);
             stat.skip.set(p);
