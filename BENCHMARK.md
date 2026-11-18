@@ -355,3 +355,117 @@ No model of the 12 is slower than on `main` (Barriers 1.96 s to 2.00 s is within
 median of 3, `main` / merged): OrSet with 4 faults 2.16 / 1.90 (1 worker: 7.13 / 5.98), ReadRepair
 2.07 / 1.61 (6.63 / 5.04), LostUpdate 1.64 / 1.38 (5.59 / 4.22), LeaseLock 0.47 / 0.40 (1.53 / 1.20):
 the speed-up from 1 to 4 workers stays at 3.0 to 3.1 times.
+
+## A compiled evaluator, and a bounded step cache as an experiment (2026-11-18)
+
+Two switches, both off by default on this branch:
+
+- `EVERYSTATE_EVAL=compiled` (default `tree`): each top-level action and each invariant is turned, once
+  before the search, into a tree of closures over a frame of slots (`src/compile.rs`). Identifiers are
+  resolved to a state variable's index, a frame slot or a constant; definitions with value parameters are
+  inlined, the parameters bound by name (an argument is evaluated where it is used, and kept for the rest
+  of the call when it is a state-level expression, which is what the tree-walker's thunks do); the
+  enumerator's work (which conjunct assigns which primed variable, which leave variables unchanged, where
+  the branches are) is decided at compile time; `S \cup {e}`, `S \ {e}`, `B (+) SetToBag({e})` and
+  `B (-) SetToBag({e})` update the set or bag without building the one-element value. Nothing is memoised
+  across states. The tree-walker stays the reference: whatever the compiler does not handle is evaluated by
+  it in a context rebuilt from the frame, an action that may reach an operator with an effect is not
+  compiled at all, and when compiled code fails in any way its output for that action is discarded and
+  the tree-walker evaluates the action again, so errors are the tree-walker's by construction. A plan that
+  mostly falls back is switched off after 512 evaluations.
+- `EVERYSTATE_STEP_CACHE=on` (default `off`; implies the compiled evaluator; `EVERYSTATE_STEP_CACHE_MB`,
+  default 32): a cache of local steps (`src/stepcache.rs`). An entry holds, for one action instance, the
+  values bound around it, everything its evaluation read of the state (a whole variable, one element
+  `f[k]`, or whether a value is in a set or bag variable) and its successors as changes to the parent
+  (unchanged, an element in or out of a set or bag, an EXCEPT at a path, or a value). A hit compares all of
+  that in full. The table is direct-mapped with a fixed number of slots, every entry is charged its own
+  size and that of every value it holds, an entry over 4 KB or over the budget is not stored, and a newer
+  entry replaces the older one in its slot. With workers there is one table per worker (the budget is per
+  worker). A unit whose hit rate over a window of 4096 lookups is under 75 % (50 % for the first window)
+  is evaluated without the cache for a while, twice as long each time it fails again.
+
+Same machine and method as above (CPU seconds, whole process, median of 5, the variants run in turn within
+each round, load average 1.0; `bench/eval-cache-final.json`), Feynman measured in the same hour.
+
+**The five larger models** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | tree | compiled | compiled + cache 32 MB | compiled / tree | RSS tree / compiled / cache | Feynman | states per CPU s: Feynman / tree / compiled / cache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| OrSet-fixed-f1 | 129242 | 1.45 | 1.08 | 0.76 | 0.74 | 108 / 106 / 86 | 1.70 | 75,819 / 89,132 / 120,113 / 170,955 |
+| OrSet-fixed-f4 | 524832 | 5.70 | 4.36 | 3.50 | 0.76 | 394 / 386 / 317 | 4.18 | 125,534 / 92,043 / 120,430 / 150,038 |
+| ReadRepair-fixed-f6 | 383579 | 4.80 | 3.14 | 2.78 | 0.65 | 235 / 228 / 209 | 2.88 | 133,269 / 79,846 / 122,198 / 138,177 |
+| LostUpdate-fixed-f6 | 420646 | 3.97 | 2.71 | 2.24 | 0.68 | 231 / 226 / 207 | 2.53 | 166,377 / 105,850 / 154,991 / 187,537 |
+| LeaseLock-fixed-f5 | 122728 | 1.05 | 0.75 | 0.76 | 0.72 | 78 / 76 / 72 | 1.51 | 81,480 / 116,884 / 163,202 / 161,910 |
+| **total** | | 16.98 | 12.04 | 10.03 | 0.71 | | 12.80 | |
+
+**The 11 corpus configurations** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | tree | compiled | compiled + cache 32 MB | compiled / tree | RSS tree / compiled / cache | Feynman | states per CPU s: Feynman / tree / compiled / cache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LeaseLock-fixed-f1 | 15009 | 0.10 | 0.07 | 0.06 | 0.71 | 18 / 18 / 18 | 0.17 | 90,010 / 157,989 / 224,015 / 250,150 |
+| LeaseLock-buggy-f1 | 16318 | 0.10 | 0.08 | 0.06 | 0.76 | 18 / 18 / 18 | 0.13 | 120,891 / 163,180 / 214,711 / 263,194 |
+| OrSet-fixed-f0 | 39568 | 0.35 | 0.27 | 0.23 | 0.77 | 44 / 42 / 36 | 0.32 | 124,692 / 111,774 / 144,409 / 175,858 |
+| OrSet-fixed-f1 | 129242 | 1.46 | 0.96 | 0.76 | 0.66 | 108 / 106 / 86 | 0.72 | 178,786 / 88,765 / 135,049 / 170,729 |
+| OrSet-buggy-f1 | 7126 | 0.06 | 0.04 | 0.03 | 0.68 | 14 / 14 / 14 | 0.02 | 286,634 / 125,018 / 182,718 / 209,588 |
+| ReadRepair-fixed-f0 | 8972 | 0.10 | 0.07 | 0.06 | 0.68 | 16 / 16 / 18 | 0.05 | 187,883 / 92,495 / 135,939 / 140,188 |
+| ReadRepair-fixed-f1 | 37309 | 0.44 | 0.26 | 0.30 | 0.59 | 32 / 32 / 34 | 0.14 | 262,123 / 84,601 / 142,401 / 125,620 |
+| ReadRepair-buggy-f0 | 9332 | 0.10 | 0.06 | 0.06 | 0.64 | 16 / 16 / 18 | 0.03 | 306,017 / 96,206 / 150,516 / 148,127 |
+| ReadRepair-buggy-f1 | 38437 | 0.39 | 0.27 | 0.28 | 0.69 | 32 / 32 / 34 | 0.12 | 313,137 / 99,320 / 143,422 / 138,263 |
+| LostUpdate-fixed-f1 | 13926 | 0.08 | 0.06 | 0.05 | 0.70 | 16 / 16 / 16 | 0.06 | 241,792 / 169,829 / 244,316 / 284,204 |
+| LostUpdate-buggy-f1 | 22799 | 0.14 | 0.10 | 0.08 | 0.70 | 22 / 22 / 20 | 0.11 | 210,443 / 165,210 / 235,041 / 288,595 |
+| **total** | | 3.30 | 2.23 | 1.97 | 0.67 | | 1.88 | |
+
+**The 12 models of the first table** (CPU seconds, median of 5; peak RSS in MB)
+
+| model | distinct | tree | compiled | compiled + cache 32 MB | compiled / tree | RSS tree / compiled / cache |
+|---|---:|---:|---:|---:|---:|---:|
+| TCommit | 34 | 0.01 | 0.01 | 0.01 | 1.00 | 13 / 13 / 13 |
+| ACP_SB_TLC | 54944 | 0.34 | 0.30 | 0.28 | 0.89 | 28 / 28 / 28 |
+| StaleShrinkV6Wait2x | 43348 | 0.34 | 0.28 | 0.30 | 0.84 | 28 / 28 / 30 |
+| Barriers | 29279 | 2.06 | 1.86 | 1.90 | 0.90 | 20 / 20 / 22 |
+| SimpleRegular | 277726 | 4.19 | 3.50 | 3.35 | 0.84 | 178 / 178 / 160 |
+| Paxos | 1207 | 0.77 | 0.79 | 0.75 | 1.03 | 52 / 52 / 52 |
+| VoteProof | 6962 | 5.67 | 5.53 | 5.61 | 0.98 | 16 / 16 / 18 |
+| MCNanoMedium | 530587 | 15.34 | 15.16 | 14.81 | 0.99 | 616 / 616 / 617 |
+| MCBakery | 655200 | 8.14 | 7.78 | 7.48 | 0.96 | 213 / 212 / 214 |
+| MCLamportMutex | 724274 | 13.02 | 11.55 | 13.20 | 0.89 | 532 / 532 / 526 |
+| MCbtree | 374727 | 12.39 | 11.17 | 12.04 | 0.90 | 193 / 193 / 185 |
+| GameOfLife | 65536 | 9.07 | 9.05 | 9.09 | 1.00 | 36 / 36 / 37 |
+| **total** | | 71.32 | 66.98 | 68.81 | 0.94 | |
+
+**Cache budget** (CPU seconds, median of 5, a separate series): compiled, then the cache at 4 / 16 / 32 / 64 / 256 MB
+
+| model | compiled | 4 MB | 16 MB | 32 MB | 64 MB | 256 MB |
+|---|---:|---:|---:|---:|---:|---:|
+| OrSet-fixed-f1 | 1.15 | 0.76 | 0.78 | 0.86 | 0.77 | 0.77 |
+| OrSet-fixed-f4 | 4.64 | 3.65 | 3.46 | 3.34 | 3.42 | 3.44 |
+| ReadRepair-fixed-f6 | 3.07 | 2.97 | 2.88 | 2.74 | 2.90 | 2.90 |
+| LostUpdate-fixed-f6 | 2.81 | 2.27 | 2.21 | 2.30 | 2.15 | 2.23 |
+| LeaseLock-fixed-f5 | 0.76 | 0.68 | 0.65 | 0.71 | 0.68 | 0.70 |
+
+Per generated successor (callgrind): instructions and allocations, tree / compiled / compiled with the cache:
+OrSet without faults 19,109 / 11,400 / 11,124 instructions and 27.8 / 15.0 / 13.1 allocations; ReadRepair with
+one fault 17,036 / 9,198 / 9,274 and 24.5 / 9.4 / 10.1; LostUpdate with one fault 18,570 / 10,266 / 9,918 and
+23.7 / 10.5 / 10.2. (On these small models the cache saves few instructions; its gain in CPU time on the
+larger ones comes with a lower peak RSS, 317 MB against 386 MB on OrSet with 4 faults: a successor built
+from a stored change shares more with its parent.)
+
+What falls back in the compiled evaluator (evaluated by the tree-walker inside otherwise compiled code):
+primed expressions other than `x' = e` / `x' \in S` / `UNCHANGED` on variables named directly; ENABLED,
+`\cdot`, temporal operators; recursive operators and functions; operators passed as arguments, LAMBDA,
+operator-valued parameters; instantiated definitions and substituted constants; subexpression selectors;
+`f[x]` / `DOMAIN f` where `f` may be a function constructor (the tree-walker keeps it unevaluated);
+function constructors with several bounds or over sets that are not enumerable; filters over sets that are
+not explicit; `\A` in an action; `=>` and `\subseteq` in an action; conjuncts reached after every variable
+is assigned. Fallback expressions per compiled evaluation on the 12 models: TCommit 0.35, ACP_SB_TLC 0.07, StaleShrinkV6Wait2x 0.52, Barriers 0.01, SimpleRegular 0.25, Paxos 5.8 (and
+16 % of its evaluations by the tree-walker: plans switched off), VoteProof 0.79, MCNanoMedium 1.5 (33 % by the
+tree-walker), MCBakery 0.00, MCLamportMutex 0.01 (4 % by the tree-walker), MCbtree 0.21 (2 %), GameOfLife:
+its one action is switched off after 512 evaluations (99 % by the tree-walker). On OrSet and LostUpdate
+there is no fallback at all, on ReadRepair 0.01 and on LeaseLock none. No compiled attempt had to be redone
+by the tree-walker on any of these models.
+
+The step cache on models where it cannot help (single runs, CPU seconds, compiled / with cache):
+GameOfLife 9.05 / 9.09 (median of 5, 0 % hits), SlidingPuzzles 1.09 / 1.10 (median of 3; 4,096 lookups, no hit,
+then the unit backs off), CoffeeCan100Beans 0.05 / 0.04 (16,384 lookups, no hit). Where the hit rate is
+middling and the keys are large the cache costs time even with the back-off: MCLamportMutex 11.55 / 13.20
+(+14 %), MCbtree 11.17 / 12.04 (+8 %).
