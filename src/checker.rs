@@ -219,6 +219,49 @@ pub(crate) struct ParentTerms {
     sum: u64,
 }
 
+/// Where `successors_with` puts the successors it finds.
+trait Sink {
+    fn emit(&mut self, vals: &[Value], action: u32);
+    fn mark(&self) -> usize;
+    /// Forgets the successors emitted since `mark`.
+    fn truncate(&mut self, mark: usize);
+}
+struct StateSink<'a> {
+    out: &'a mut Vec<StateRef>,
+    act: &'a mut Vec<u32>,
+}
+impl Sink for StateSink<'_> {
+    fn emit(&mut self, vals: &[Value], action: u32) {
+        self.out.push(StateData::new(vals.to_vec()));
+        self.act.push(action);
+    }
+    fn mark(&self) -> usize {
+        self.act.len()
+    }
+    fn truncate(&mut self, mark: usize) {
+        self.out.truncate(mark);
+        self.act.truncate(mark);
+    }
+}
+struct RowSink<'a> {
+    out: &'a mut Vec<Value>,
+    act: &'a mut Vec<u32>,
+    n: usize,
+}
+impl Sink for RowSink<'_> {
+    fn emit(&mut self, vals: &[Value], action: u32) {
+        self.out.extend_from_slice(vals);
+        self.act.push(action);
+    }
+    fn mark(&self) -> usize {
+        self.act.len()
+    }
+    fn truncate(&mut self, mark: usize) {
+        self.out.truncate(mark * self.n);
+        self.act.truncate(mark);
+    }
+}
+
 /// Applies a model-value permutation; None when the value is unchanged.
 /// `m` is a dense table indexed by string id (identity where the entry equals the index or is missing).
 pub fn permute(v: &Value, m: &[u32]) -> R<Option<Value>> {
@@ -305,6 +348,8 @@ pub struct Checker<'a> {
     /// ACTION_CONSTRAINT, VIEW, SYMMETRY, action property or recorded graph. EVERYSTATE_ENGINE=classic
     /// switches it off (every successor is then allocated before it is looked up).
     flat: bool,
+    /// EVERYSTATE_EVAL=compiled: the compiled actions and invariants (see compile.rs)
+    plans: Option<crate::compile::Plans>,
 }
 
 pub const NO_PARENT: u32 = u32::MAX;
@@ -391,6 +436,7 @@ impl<'a> Checker<'a> {
             outdeg: vec![],
             cur_level: 0,
             empty: StateData::blank(0),
+            plans: if crate::compile::enabled() { Some(crate::compile::compile(model)) } else { None },
             flat: !classic_engine()
                 && !opts_record
                 && model.constraints.is_empty()
@@ -900,22 +946,14 @@ impl<'a> Checker<'a> {
 
     // Successors of one state, as (state, action index) pairs in action order.
     pub fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
-        let n = self.nvars;
-        self.successors_with(s, &mut |nxt, ai| {
-            out.push(StateData::new(nxt.snapshot(n)));
-            out_act.push(ai);
-        })
+        self.successors_with(s, &mut StateSink { out, act: out_act })
     }
     /// As `successors`, without allocating a state per successor: the variables of each successor are
     /// appended to `out` (`nvars` values per successor).
     pub(crate) fn successors_flat(&self, s: &StateRef, out: &mut Vec<Value>, out_act: &mut Vec<u32>) -> R<()> {
-        let n = self.nvars;
-        self.successors_with(s, &mut |nxt, ai| {
-            nxt.with(|v| out.extend_from_slice(&v[..n]));
-            out_act.push(ai);
-        })
+        self.successors_with(s, &mut RowSink { out, act: out_act, n: self.nvars })
     }
-    fn successors_with(&self, s: &StateRef, emit: &mut dyn FnMut(&StateData, u32)) -> R<()> {
+    fn successors_with(&self, s: &StateRef, sink: &mut dyn Sink) -> R<()> {
         let ev = self.ev;
         let m = self.model;
         let n = self.nvars;
@@ -927,29 +965,53 @@ impl<'a> Checker<'a> {
             if Rc::strong_count(&nxt) > 2 {
                 nxt = StateData::blank(n);
             }
-            let nxt = &nxt;
-            ev.set_state(s, Some(nxt));
+            ev.set_state(s, Some(&nxt));
             ev.init_mode.set(false);
             ev.prime_depth.set(0);
             ev.call_depth.set(0);
             ev.n_assigned.set(0);
+            if let (Some(plans), false) = (&self.plans, ev.steps.enabled.get()) {
+                let mark = sink.mark();
+                let attempt = plans.run_action(ev, ai, s, &nxt, n, &mut || {
+                    if !nxt.all_defined(n) {
+                        // (the tree-walker, run again below, words the error)
+                        return Err(Box::new(Fail::Check { status: "incomplete", message: String::new() }));
+                    }
+                    nxt.with(|v| sink.emit(&v[..n], ai as u32));
+                    Ok(())
+                });
+                match attempt {
+                    Some(Ok(())) => continue,
+                    Some(Err(_)) => {
+                        // The compiled attempt failed: forget what it produced and let the tree-walker
+                        // evaluate the action from the start (it decides whether, and how, this is an error).
+                        sink.truncate(mark);
+                        nxt = StateData::blank(n);
+                        ev.set_state(s, Some(&nxt));
+                        ev.init_mode.set(false);
+                        ev.prime_depth.set(0);
+                        ev.call_depth.set(0);
+                        ev.n_assigned.set(0);
+                    }
+                    None => {}
+                }
+            }
+            let nxt = &nxt;
             let mut found = || {
                 if !nxt.all_defined(n) {
-                    {
-                        let missing = self.missing(&nxt);
-                        let which = if actions.len() == 1 { "the next-state action".to_string() } else { format!("action {} of the next-state relation", a.name) };
-                        return Err(Box::new(Fail::Check {
-                            status: "incomplete",
-                            message: format!(
-                                "Successor state is not completely specified by {}. The following variable{} not defined: {}.",
-                                which,
-                                if missing.len() > 1 { "s are" } else { " is" },
-                                missing.join(", ")
-                            ),
-                        }));
-                    }
+                    let missing = self.missing(nxt);
+                    let which = if actions.len() == 1 { "the next-state action".to_string() } else { format!("action {} of the next-state relation", a.name) };
+                    return Err(Box::new(Fail::Check {
+                        status: "incomplete",
+                        message: format!(
+                            "Successor state is not completely specified by {}. The following variable{} not defined: {}.",
+                            which,
+                            if missing.len() > 1 { "s are" } else { " is" },
+                            missing.join(", ")
+                        ),
+                    }));
                 }
-                emit(nxt, ai as u32);
+                nxt.with(|v| sink.emit(&v[..n], ai as u32));
                 Ok(())
             };
             if ev.steps.enabled.get() {
@@ -961,6 +1023,22 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// An invariant in a state: compiled code when there is some and it succeeds, else the tree-walker.
+    pub(crate) fn eval_invariant(&self, i: usize, s: &StateRef) -> R<bool> {
+        if let Some(plans) = &self.plans {
+            let ev = self.ev;
+            ev.set_state(s, None);
+            ev.init_mode.set(false);
+            ev.prime_depth.set(0);
+            ev.call_depth.set(0);
+            ev.n_assigned.set(0);
+            if let Some(b) = plans.run_invariant(ev, i, s, self.nvars) {
+                return Ok(b);
+            }
+        }
+        self.eval_pred(&self.model.invariants[i], s, None)
+    }
+
     pub fn run(&mut self, events: &mut dyn Events) -> CheckResult {
         let r = self.search(events);
         #[cfg(not(target_arch = "wasm32"))]
@@ -969,6 +1047,9 @@ impl<'a> Checker<'a> {
             let m = self.model;
             let report = self.ev.steps.report(&|ai| format!("{}{}", m.actions[ai].name, m.actions[ai].params));
             eprint!("{}", report);
+        }
+        if let (Some(p), true) = (&self.plans, std::env::var_os("EVERYSTATE_EVAL_STATS").is_some()) {
+            eprint!("{}", p.report());
         }
         r
     }
@@ -1129,8 +1210,8 @@ impl<'a> Checker<'a> {
                     return self.error(self.describe_err(&e, true), Some(self.trace_plus(sid, &t, ai, -1)));
                 }
                 if unseen {
-                    for inv in &m.invariants {
-                        match self.eval_pred(inv, &t, None) {
+                    for (ii, inv) in m.invariants.iter().enumerate() {
+                        match self.eval_invariant(ii, &t) {
                             Err(e) => {
                                 let mut r = self.error(format!("Evaluating invariant {} failed.\n{}", inv.name, self.describe_err(&e, false)), Some(self.trace_plus(sid, &t, ai, id)));
                                 r.code = Some(2111);

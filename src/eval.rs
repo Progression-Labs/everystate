@@ -472,7 +472,7 @@ pub struct Evaluator {
     pub rng: Cell<u64>,
     /// EVERYSTATE_CACHE_STATS: the read tracker of the step-cache estimate (see stepstats.rs)
     pub steps: crate::stepstats::StepStats,
-    at: Name,
+    pub(crate) at: Name,
     lambda: Name,
     enabled_mark: Name,
 }
@@ -1381,7 +1381,7 @@ impl Evaluator {
         c
     }
 
-    fn str_node(&self, s: &Rc<str>, id: &Cell<Option<StrId>>) -> StrId {
+    pub(crate) fn str_node(&self, s: &Rc<str>, id: &Cell<Option<StrId>>) -> StrId {
         match id.get() {
             Some(i) => i,
             None => {
@@ -2114,7 +2114,7 @@ impl Evaluator {
         self.primed_eq(e, ctx, &v0)
     }
 
-    fn set_union(&self, a: Rc<SetV>, b: Rc<SetV>) -> R<Value> {
+    pub(crate) fn set_union(&self, a: Rc<SetV>, b: Rc<SetV>) -> R<Value> {
         if !a.reducible() || !b.reducible() {
             return Ok(Value::Set(Rc::new(SetV::new(SetK::Cup(a, b)))));
         }
@@ -2285,17 +2285,24 @@ impl Evaluator {
     }
 
     fn except_update(&self, f: Value, path: &[Value], i: usize, val_node: N, ctx: &C, n: N) -> R<Value> {
+        self.except_with(f, path, i, &mut |old: Value| -> R<Value> {
+            if matches!(val_node.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val_node.e, E::App { args, sel: None, .. } if args.is_empty()) {
+                // a literal or a name: `@` cannot occur in it, so it needs no binding
+                return self.eval(val_node, ctx);
+            }
+            self.eval(val_node, &cons(self.at, old, ctx))
+        }, n)
+    }
+    /// `[f EXCEPT !path = leaf(old)]` from position `i` of the path: `leaf` computes the new value of the
+    /// element from its old one.
+    pub(crate) fn except_with(&self, f: Value, path: &[Value], i: usize, leaf: &mut dyn FnMut(Value) -> R<Value>, n: N) -> R<Value> {
         let key = &path[i];
         let last = i == path.len() - 1;
-        let upd = |old: Value| -> R<Value> {
+        let mut upd = |old: Value| -> R<Value> {
             if last {
-                if matches!(val_node.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val_node.e, E::App { args, sel: None, .. } if args.is_empty()) {
-                    // a literal or a name: `@` cannot occur in it, so it needs no binding
-                    return self.eval(val_node, ctx);
-                }
-                self.eval(val_node, &cons(self.at, old, ctx))
+                leaf(old)
             } else {
-                self.except_update(old, path, i + 1, val_node, ctx, n)
+                self.except_with(old, path, i + 1, &mut *leaf, n)
             }
         };
         match f {
@@ -2363,7 +2370,8 @@ impl Evaluator {
             Value::LazyFcn(lf) => {
                 let d = lf.domain(self)?;
                 if d.enumerable() {
-                    return self.except_update(lf.force(self)?, path, i, val_node, ctx, n);
+                    drop(upd);
+                    return self.except_with(lf.force(self)?, path, i, leaf, n);
                 }
                 if !d.contains(key)? {
                     return Ok(Value::LazyFcn(lf));

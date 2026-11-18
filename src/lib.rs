@@ -6,6 +6,7 @@ pub mod cfg;
 pub mod checker;
 pub mod cli;
 pub mod community;
+pub mod compile;
 pub mod conform;
 pub mod eval;
 pub mod host;

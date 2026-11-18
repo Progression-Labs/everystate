@@ -738,8 +738,8 @@ fn expand(ck: &Checker, s: &StateRef, sb: &[u8], lvl: u32, fps: &FpSet, local: &
                 out.ent.push(Ent { fp, act: acts[i], kind: CAND, len: (out.bytes.len() - mark) as u32 });
                 if !m.invariants.is_empty() {
                     let t = StateData::new(row.to_vec());
-                    for inv in &m.invariants {
-                        if !matches!(ck.eval_pred(inv, &t, None), Ok(true)) {
+                    for ii in 0..m.invariants.len() {
+                        if !matches!(ck.eval_invariant(ii, &t), Ok(true)) {
                             return Some(Event::Check);
                         }
                     }
@@ -802,8 +802,8 @@ fn expand(ck: &Checker, s: &StateRef, sb: &[u8], lvl: u32, fps: &FpSet, local: &
             }
         }
         if unseen {
-            for inv in &m.invariants {
-                if !matches!(ck.eval_pred(inv, t, None), Ok(true)) {
+            for ii in 0..m.invariants.len() {
+                if !matches!(ck.eval_invariant(ii, t), Ok(true)) {
                     return Some(Event::Check);
                 }
             }
