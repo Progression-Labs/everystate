@@ -62,6 +62,17 @@ impl StateData {
         }
         drop(old);
     }
+    /// Resets variable `i` to unassigned.
+    #[inline]
+    pub fn clear(&self, i: usize) {
+        let old;
+        {
+            // SAFETY: as in `set`.
+            let v = unsafe { &mut *self.vals.get() };
+            old = std::mem::replace(&mut v[i], Value::Undef);
+        }
+        drop(old);
+    }
     pub fn snapshot(&self, n: usize) -> Vec<Value> {
         let v = unsafe { &*self.vals.get() };
         v[..n].to_vec()
@@ -644,6 +655,26 @@ impl Evaluator {
             E::Str(..) => return self.eval(n, ctx),
             E::Bool(b) => return Ok(Value::Bool(*b)),
             E::Lambda { params, body } => return Ok(Value::Closure(Rc::new(Closure { params, body, ctx: ctx.clone(), name: self.lambda }))),
+            E::Dot { e, field } => {
+                // m.f where m is a local name bound to a record that has the field: the value is at hand,
+                // no thunk is needed (anything else, including a missing field, stays delayed)
+                if let E::App { name, args, sel, r, .. } = &e.e {
+                    if args.is_empty() && sel.is_none() && matches!(r.get(), Res::Local) {
+                        let mut c = ctx.as_ref();
+                        while let Some(node) = c {
+                            if node.name == *name {
+                                if let Bind::Val(Value::Record(rec)) = &node.val {
+                                    if let Some(v) = rec.get(*field) {
+                                        return Ok(v.clone());
+                                    }
+                                }
+                                break;
+                            }
+                            c = node.next.as_ref();
+                        }
+                    }
+                }
+            }
             E::App { name, args, sel, r, .. } if args.is_empty() && sel.is_none() => match r.get() {
                 Res::Local => return self.lookup_value(ctx, *name, Some(n)),
                 Res::Def(d) => {
@@ -1327,7 +1358,7 @@ impl Evaluator {
     #[inline(always)]
     fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
-            E::App { r, name, .. } => {
+            E::App { r, name, sel, .. } => {
                 // The most frequent leaves, without the general application path: a state variable or a
                 // constant outside any instance context, and a local identifier bound to a plain value.
                 match r.get() {
@@ -1361,6 +1392,14 @@ impl Evaluator {
                                     if matches!(v, Value::Int(_) | Value::Bool(_) | Value::Str(_) | Value::Model(_) | Value::Tuple(_) | Value::Record(_) | Value::Fcn(_) | Value::Set(_)) {
                                         return Ok(v.clone());
                                     }
+                                    if let (Value::Thunk(lz), None) = (v, sel) {
+                                        // a delayed argument: force it here (as eval_app would after a second lookup)
+                                        let v = self.force(lz)?;
+                                        return match &v {
+                                            Value::LazyFcn(f) => f.force(self),
+                                            _ => Ok(v),
+                                        };
+                                    }
                                 }
                                 break;
                             }
@@ -1374,13 +1413,21 @@ impl Evaluator {
             E::Op(k, a) => self.eval_op_fast(n, *k, a, ctx),
             E::Num(v) => Ok(Value::Int(*v)),
             E::Bool(b) => Ok(Value::Bool(*b)),
+            E::Str(s, id) => Ok(Value::Str(self.str_node(s, id))),
             _ => self.eval_slow(n, ctx),
         }
     }
 
     #[inline(never)]
     fn eval_app_forced(&self, n: N, ctx: &C) -> R<Value> {
-        let v = self.eval_app(n, ctx)?;
+        let v = match &n.e {
+            // an application of a definition (user-defined or builtin): no need to look at the other cases
+            E::App { args, sel: None, r, .. } => match r.get() {
+                Res::Def(d) => self.apply_def(d, n, args, ctx)?,
+                _ => self.eval_app(n, ctx)?,
+            },
+            _ => self.eval_app(n, ctx)?,
+        };
         if let Value::LazyFcn(f) = &v {
             return f.force(self);
         }
@@ -2114,6 +2161,10 @@ impl Evaluator {
         let last = i == path.len() - 1;
         let upd = |old: Value| -> R<Value> {
             if last {
+                if matches!(val_node.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val_node.e, E::App { args, sel: None, .. } if args.is_empty()) {
+                    // a literal or a name: `@` cannot occur in it, so it needs no binding
+                    return self.eval(val_node, ctx);
+                }
                 self.eval(val_node, &cons(self.at, old, ctx))
             } else {
                 self.except_update(old, path, i + 1, val_node, ctx, n)
@@ -2651,14 +2702,27 @@ impl Evaluator {
     fn enum_unchanged(&self, e: N, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
         if let E::Op(K::Tuple, items) = &e.e {
             // The usual shape, a tuple of variables: one pass instead of a continuation per variable.
-            if items.len() <= 64 && items.iter().all(|it| plain_var(it, ctx).is_some()) {
+            let mut idxs = [0u32; 32];
+            let mut plain = items.len() <= 32;
+            if plain {
+                for (j, it) in items.iter().enumerate() {
+                    match plain_var(it, ctx) {
+                        Some(i) => idxs[j] = i as u32,
+                        None => {
+                            plain = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if plain {
                 let nxt = self.nxt.borrow().as_ref().unwrap().clone();
                 let cur = self.cur.borrow().clone();
-                let mut set: u64 = 0; // the items assigned here
+                let mut set: u32 = 0; // the items assigned here
                 let mut r: R<()> = Ok(());
                 let mut go_on = true;
                 for (j, it) in items.iter().enumerate() {
-                    let idx = plain_var(it, ctx).unwrap() as usize;
+                    let idx = idxs[j] as usize;
                     if nxt.is_undef(idx) {
                         let v = cur.get(idx);
                         self.st_touch.set(self.st_touch.get() + 1);
@@ -2689,12 +2753,12 @@ impl Evaluator {
                 if go_on {
                     r = k();
                 }
-                for (j, it) in items.iter().enumerate().rev() {
+                for j in (0..items.len()).rev() {
                     if set & (1 << j) != 0 {
-                        nxt.set(plain_var(it, ctx).unwrap() as usize, Value::Undef);
-                        self.n_assigned.set(self.n_assigned.get() - 1);
+                        nxt.clear(idxs[j] as usize);
                     }
                 }
+                self.n_assigned.set(self.n_assigned.get() - set.count_ones() as i64);
                 return r;
             }
             fn go(ev: &Evaluator, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {

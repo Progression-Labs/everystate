@@ -282,6 +282,53 @@ fn bag_merge(d0: &[Value], v0: &[Value], d1: &[Value], v1: &[Value], plus: bool)
     let mut dom: Vec<Value> = Vec::with_capacity(d0.len() + if plus { d1.len() } else { 0 });
     let mut vals: Vec<Value> = Vec::with_capacity(dom.capacity());
     let (mut i, mut j) = (0, 0);
+    if (d1.len() <= 2 || d1.len() * 4 <= d0.len()) && !d0.is_empty() && v0.iter().all(|v| matches!(v, Value::Int(n) if *n > 0)) {
+        // A few elements against a proper bag (the usual `net (+) one` / `net (-) one`): find each by
+        // binary search and copy the stretches between them as they are.
+        for j in 0..d1.len() {
+            let (mut lo, mut hi) = (i, d0.len());
+            let mut found = false;
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let c = match scalar_cmp(&d0[mid], &d1[j]) {
+                    Some(c) => c,
+                    None => compare(&d0[mid], &d1[j]).ok()?,
+                };
+                match c {
+                    Ordering::Less => lo = mid + 1,
+                    Ordering::Greater => hi = mid,
+                    Ordering::Equal => {
+                        lo = mid;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            dom.extend_from_slice(&d0[i..lo]);
+            vals.extend_from_slice(&v0[i..lo]);
+            i = lo;
+            let n1 = bag_n(&v1[j]);
+            let n = if found {
+                i += 1;
+                if plus {
+                    bag_add(bag_n(&v0[lo]), n1).ok()?
+                } else {
+                    bag_n(&v0[lo]) - n1
+                }
+            } else if plus {
+                n1
+            } else {
+                0
+            };
+            if n > 0 {
+                dom.push(if found { d0[lo].clone() } else { d1[j].clone() });
+                vals.push(Value::Int(n));
+            }
+        }
+        dom.extend_from_slice(&d0[i..]);
+        vals.extend_from_slice(&v0[i..]);
+        return Some(make_fcn_owned(dom, vals));
+    }
     let mut put = |d: &Value, n: i64, same: Option<&Value>| {
         if n > 0 {
             dom.push(d.clone());

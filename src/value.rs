@@ -649,6 +649,9 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
         }
         (Value::Set(_), _) => cmp_fail(a, b),
         (Value::Tuple(x), Value::Tuple(y)) => {
+            if Rc::ptr_eq(x, y) {
+                return Ok(Ordering::Equal);
+            }
             if x.len() != y.len() {
                 return Ok(x.len().cmp(&y.len()));
             }
@@ -664,6 +667,9 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
             Ok(Ordering::Equal)
         }
         (Value::Record(x), Value::Record(y)) => {
+            if Rc::ptr_eq(x, y) {
+                return Ok(Ordering::Equal);
+            }
             let n = x.names.len();
             if n != y.names.len() {
                 return Ok(n.cmp(&y.names.len()));
@@ -676,7 +682,10 @@ pub fn compare(a: &Value, b: &Value) -> R<Ordering> {
                 }
             }
             for i in 0..n {
-                let c = compare(&x.vals[i], &y.vals[i])?;
+                let c = match scalar_cmp(&x.vals[i], &y.vals[i]) {
+                    Some(c) => c,
+                    None => compare(&x.vals[i], &y.vals[i])?,
+                };
                 if c != Ordering::Equal {
                     return Ok(c);
                 }
