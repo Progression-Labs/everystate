@@ -280,7 +280,11 @@ fn same_rc(a: &Value, b: &Value) -> bool {
 /// `ser_state` for a successor `t` of the state `s` whose encoding is `sb` (variable `i` at `spans[i]`):
 /// the variables that `t` shares with `s` are copied instead of encoded again.
 fn ser_successor(t: &StateRef, s: &StateRef, sb: &[u8], spans: &[(usize, usize)], out: &mut Vec<u8>, tmp: &mut Vec<u8>) -> bool {
-    t.with(|tv| {
+    t.with(|tv| ser_row(tv, s, sb, spans, out, tmp))
+}
+/// `ser_successor` for a successor given as a row of variables.
+fn ser_row(tv: &[Value], s: &StateRef, sb: &[u8], spans: &[(usize, usize)], out: &mut Vec<u8>, tmp: &mut Vec<u8>) -> bool {
+    {
         s.with(|sv| {
             for i in 0..spans.len() {
                 if same_rc(&tv[i], &sv[i]) {
@@ -291,7 +295,7 @@ fn ser_successor(t: &StateRef, s: &StateRef, sb: &[u8], spans: &[(usize, usize)]
             }
             true
         })
-    })
+    }
 }
 /// Where the variables are in the encoding of a state (each span includes the length prefix).
 fn var_spans(b: &[u8], nvars: usize, spans: &mut Vec<(usize, usize)>) {
@@ -702,6 +706,53 @@ fn expand(ck: &Checker, s: &StateRef, sb: &[u8], lvl: u32, fps: &FpSet, local: &
     level.set(lvl as i64);
     succs.clear();
     acts.clear();
+    if ck.is_flat() && !flags.record {
+        // As the sequential loop in flat mode: the successors are rows of a buffer, their fingerprints
+        // are the parent's with the changed variables replaced, and a state is built (for the
+        // invariants) only for a successor that may be new. There are no constraints and no action
+        // properties in this mode.
+        let nv = ck.model.vars.len();
+        scratch.rows.clear();
+        if ck.successors_flat(s, &mut scratch.rows, acts).is_err() {
+            return Some(Event::Check);
+        }
+        let extra = ev.extra_generated.replace(0);
+        let first = out.ent.len();
+        var_spans(sb, nv, &mut scratch.spans);
+        if !acts.is_empty() && ck.parent_terms(s, &mut scratch.terms).is_err() {
+            return Some(Event::Check);
+        }
+        for i in 0..acts.len() {
+            let row = &scratch.rows[i * nv..(i + 1) * nv];
+            level.set(lvl as i64 + 1);
+            let fp = match ck.row_fingerprint(s, &scratch.terms, row) {
+                Ok(fp) => fp,
+                Err(_) => return Some(Event::Check),
+            };
+            let candidate = fps.get(fp).is_none() && local.put(fp, 0).is_none();
+            if candidate {
+                let mark = out.bytes.len();
+                if !ser_row(row, s, sb, &scratch.spans, &mut out.bytes, &mut scratch.tmp) {
+                    return Some(Event::Fallback(UNSENDABLE.into()));
+                }
+                out.ent.push(Ent { fp, act: acts[i], kind: CAND, len: (out.bytes.len() - mark) as u32 });
+                if !m.invariants.is_empty() {
+                    let t = StateData::new(row.to_vec());
+                    for inv in &m.invariants {
+                        if !matches!(ck.eval_pred(inv, &t, None), Ok(true)) {
+                            return Some(Event::Check);
+                        }
+                    }
+                }
+            }
+            level.set(lvl as i64);
+        }
+        if acts.is_empty() && flags.check_deadlock {
+            return Some(Event::Check);
+        }
+        out.src.push((acts.len() as u64 + extra, (out.ent.len() - first) as u32));
+        return None;
+    }
     if ck.successors(s, succs, acts).is_err() {
         return Some(Event::Check);
     }
@@ -811,6 +862,9 @@ fn expand_init(ck: &Checker, s: &StateRef, local: &mut FpSet, out: &mut ChunkOut
 struct Scratch {
     spans: Vec<(usize, usize)>,
     tmp: Vec<u8>,
+    /// flat mode: the variables of the successors of the state being expanded, and its fingerprint terms
+    rows: Vec<Value>,
+    terms: crate::checker::ParentTerms,
 }
 
 struct Engine {

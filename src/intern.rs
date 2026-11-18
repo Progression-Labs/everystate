@@ -160,6 +160,54 @@ pub fn str_id(s: &str) -> StrId {
         StrId(n.slow_id(s))
     })
 }
+/// 64-bit hash of the bytes of a string (FNV-1a, then a multiply-xorshift finalizer); never 0.
+fn content_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    h | (h == 0) as u64
+}
+thread_local! {
+    /// Content hash of each string this thread has fingerprinted, by id (0: not computed yet), and the
+    /// table's (pointer, length) for `str_hash` to read without a borrow.
+    static STR_HASH_TABLE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static STR_HASHES: Cell<(*const u64, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+}
+/// Hash of the text of a string / model value. Fingerprints are built from it, so they depend on what a
+/// state contains and not on string ids: the same in every thread and for every order of interning.
+#[inline]
+pub fn str_hash(id: StrId) -> u64 {
+    let (p, len) = STR_HASHES.with(|c| c.get());
+    if (id.0 as usize) < len {
+        // SAFETY: the table belongs to this thread, and the pointer and length are refreshed whenever it
+        // is resized (`str_hash_slow`); the index was just checked.
+        let h = unsafe { *p.add(id.0 as usize) };
+        if h != 0 {
+            return h;
+        }
+    }
+    str_hash_slow(id)
+}
+#[cold]
+fn str_hash_slow(id: StrId) -> u64 {
+    let h = content_hash(&str_of(id));
+    if id.0 < PROVISIONAL {
+        STR_HASH_TABLE.with(|t| {
+            let mut t = t.borrow_mut();
+            let i = id.0 as usize;
+            if i >= t.len() {
+                t.resize((i + 1).next_power_of_two(), 0);
+            }
+            t[i] = h;
+            STR_HASHES.with(|c| c.set((t.as_ptr(), t.len())));
+        });
+    }
+    h
+}
 pub fn str_of(id: StrId) -> Rc<str> {
     STRS.with(|t| {
         let mut t = t.borrow_mut();

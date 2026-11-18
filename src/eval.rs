@@ -62,6 +62,44 @@ impl StateData {
         }
         drop(old);
     }
+    /// Every listed variable is unassigned here and assigned in `src`.
+    #[inline]
+    pub fn can_fill(&self, src: &StateData, idxs: &[u32]) -> bool {
+        // SAFETY: as in `get`: shared reads that do not outlive this call.
+        let (d, s) = unsafe { (&*self.vals.get(), &*src.vals.get()) };
+        idxs.iter().all(|&i| {
+            let i = i as usize;
+            i < d.len() && i < s.len() && matches!(d[i], Value::Undef) && !matches!(s[i], Value::Undef)
+        })
+    }
+    /// Copies the listed variables from `src` (after `can_fill`: the slots written are unassigned, so no
+    /// value is dropped while the vector is borrowed, and `src` is another state).
+    #[inline]
+    pub fn fill(&self, src: &StateData, idxs: &[u32]) {
+        debug_assert!(!std::ptr::eq(self, src));
+        // SAFETY: single-threaded; `self` and `src` are different states, `clone` cannot re-enter.
+        let (d, s) = unsafe { (&mut *self.vals.get(), &*src.vals.get()) };
+        for &i in idxs {
+            d[i as usize] = s[i as usize].clone();
+        }
+    }
+    /// All of the first `n` variables are assigned.
+    #[inline]
+    pub fn all_defined(&self, n: usize) -> bool {
+        let v = unsafe { &*self.vals.get() };
+        v.len() >= n && v[..n].iter().all(|x| !matches!(x, Value::Undef))
+    }
+    /// Resets variable `i` to unassigned.
+    #[inline]
+    pub fn clear(&self, i: usize) {
+        let old;
+        {
+            // SAFETY: as in `set`.
+            let v = unsafe { &mut *self.vals.get() };
+            old = std::mem::replace(&mut v[i], Value::Undef);
+        }
+        drop(old);
+    }
     pub fn snapshot(&self, n: usize) -> Vec<Value> {
         let v = unsafe { &*self.vals.get() };
         v[..n].to_vec()
@@ -425,13 +463,32 @@ pub struct Evaluator {
     pub host: RefCell<crate::host::HostRef>,
     /// while set, `eval` records the chain of expressions being evaluated (for TLC's message 2103)
     pub tracing: Cell<bool>,
+    /// `tracing`, or the read tracker of stepstats.rs is on: `eval` then takes its instrumented path. The
+    /// one flag ordinary evaluation tests.
+    pub hooked: Cell<bool>,
     pub trace_stack: RefCell<Vec<N>>,
     /// lazily built records for TLCGet("spec")
     pub spec_info: RefCell<Option<Box<dyn Fn() -> R<Value>>>>,
     pub rng: Cell<u64>,
+    /// EVERYSTATE_CACHE_STATS: the read tracker of the step-cache estimate (see stepstats.rs)
+    pub steps: crate::stepstats::StepStats,
     at: Name,
     lambda: Name,
     enabled_mark: Name,
+}
+
+/// The index of the variable an expression names directly: a declared variable used outside any instance
+/// environment (where a substitution could stand for it). None for everything else.
+#[inline]
+pub(crate) fn plain_var(e: N, ctx: &C) -> Option<i64> {
+    if let E::App { args, sel, r, .. } = &e.e {
+        if let Res::Decl(d) = r.get() {
+            if d.is_var && d.idx.get() >= 0 && args.is_empty() && sel.is_none() && ctx.as_ref().map_or(true, |c| !c.env && c.base.is_none()) {
+                return Some(d.idx.get() as i64);
+            }
+        }
+    }
+    None
 }
 
 fn undefined_ident<T>(name: Name) -> R<T> {
@@ -459,9 +516,11 @@ impl Evaluator {
             tlc_cache: RefCell::new(HashMap::new()),
             host: RefCell::new(Rc::new(crate::host::NullHost)),
             tracing: Cell::new(false),
+            hooked: Cell::new(false),
             trace_stack: RefCell::new(Vec::new()),
             spec_info: RefCell::new(None),
             rng: Cell::new(0x9E3779B97F4A7C15),
+            steps: crate::stepstats::StepStats::new(),
             at: name("@"),
             lambda: name("LAMBDA"),
             enabled_mark: name("\u{0}enabled"),
@@ -470,6 +529,14 @@ impl Evaluator {
         e
     }
 
+    pub fn set_tracing(&self, on: bool) {
+        self.tracing.set(on);
+        self.hooked.set(on || self.steps.on.get());
+    }
+    pub(crate) fn set_steps_on(&self, on: bool) {
+        self.steps.on.set(on);
+        self.hooked.set(on || self.tracing.get());
+    }
     pub fn fail<T>(&self, msg: String, n: N) -> R<T> {
         Err(Box::new(Fail::Tla(TlaError { msg, loc: Some(n.loc), module: n.module_str(), kind: "eval" })))
     }
@@ -570,6 +637,10 @@ impl Evaluator {
             }
             if s == self.cur_id() && !self.init_mode.get() && self.prime_depth.get() == 0 {
                 self.st_touch.set(self.st_touch.get() + 1);
+                if self.steps.on.get() {
+                    // computed from the state before this unit began: it stands for the reads it made
+                    self.steps.elem(usize::MAX >> 8, Ok(e as *const Node as usize as u64), value_word(&v.borrow()));
+                }
                 return Ok(v.borrow().clone());
             }
         }
@@ -632,6 +703,26 @@ impl Evaluator {
             E::Str(..) => return self.eval(n, ctx),
             E::Bool(b) => return Ok(Value::Bool(*b)),
             E::Lambda { params, body } => return Ok(Value::Closure(Rc::new(Closure { params, body, ctx: ctx.clone(), name: self.lambda }))),
+            E::Dot { e, field } => {
+                // m.f where m is a local name bound to a record that has the field: the value is at hand,
+                // no thunk is needed (anything else, including a missing field, stays delayed)
+                if let E::App { name, args, sel, r, .. } = &e.e {
+                    if args.is_empty() && sel.is_none() && matches!(r.get(), Res::Local) {
+                        let mut c = ctx.as_ref();
+                        while let Some(node) = c {
+                            if node.name == *name {
+                                if let Bind::Val(Value::Record(rec)) = &node.val {
+                                    if let Some(v) = rec.get(*field) {
+                                        return Ok(v.clone());
+                                    }
+                                }
+                                break;
+                            }
+                            c = node.next.as_ref();
+                        }
+                    }
+                }
+            }
             E::App { name, args, sel, r, .. } if args.is_empty() && sel.is_none() => match r.get() {
                 Res::Local => return self.lookup_value(ctx, *name, Some(n)),
                 Res::Def(d) => {
@@ -764,7 +855,23 @@ impl Evaluator {
                     res = self.expand_op(&b, &self.mk_args(args, ctx)?)?;
                 }
             },
-            Res::Def(d) => res = self.expand_def(d, &self.mk_args(args, ctx)?, &base_of(ctx))?,
+            Res::Def(d) => {
+                let dd = d.over.get().unwrap_or(d);
+                if dd.builtin.get().is_some() && sel.is_none() {
+                    // a builtin operator has no body to expand: do not build thunks for its arguments
+                    return Ok(None);
+                }
+                if dd.inst.is_none() && dd.params.len() == args.len() {
+                    // bind the parameters directly, without an intermediate argument vector
+                    let mut c = base_of(ctx);
+                    for (p, a) in dd.params.iter().zip(args.iter()) {
+                        c = cons(p.name, self.mk_arg(a, ctx)?, &c);
+                    }
+                    res = Some((dd.body.get().unwrap(), c));
+                } else {
+                    res = self.expand_def(d, &self.mk_args(args, ctx)?, &base_of(ctx))?;
+                }
+            }
             Res::Decl(d) => {
                 let base = base_of(ctx);
                 let b = if base.is_some() { self.env_lookup(&base, name) } else { None };
@@ -1075,6 +1182,9 @@ impl Evaluator {
                                 if idx >= 0 {
                                     let v = self.cur.borrow().get(idx as usize);
                                     self.pr_touch.set(self.pr_touch.get() + 1);
+                                    if self.steps.on.get() {
+                                        self.steps.var(idx as usize, &v, true);
+                                    }
                                     if matches!(v, Value::Undef) {
                                         return self.at_node(undefined_ident(d.name), n);
                                     }
@@ -1099,6 +1209,9 @@ impl Evaluator {
                     }
                     if matches!(v, Value::Undef) {
                         return self.at_node(undefined_ident(d.name), n);
+                    }
+                    if self.steps.on.get() {
+                        self.steps.var(idx.max(0) as usize, &v, self.prime_depth.get() > 0);
                     }
                     return Ok(v);
                 }
@@ -1281,10 +1394,18 @@ impl Evaluator {
 
     #[inline(never)]
     pub fn eval(&self, n: N, ctx: &C) -> R<Value> {
+        if self.hooked.get() {
+            return self.eval_hooked(n, ctx);
+        }
+        self.eval_inner(n, ctx)
+    }
+    #[cold]
+    #[inline(never)]
+    fn eval_hooked(&self, n: N, ctx: &C) -> R<Value> {
         if self.tracing.get() {
             return self.eval_traced(n, ctx);
         }
-        self.eval_inner(n, ctx)
+        self.eval_steps(n, ctx)
     }
     #[cold]
     #[inline(never)]
@@ -1297,9 +1418,9 @@ impl Evaluator {
         r
     }
     #[inline(always)]
-    fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
+    pub(crate) fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
-            E::App { r, name, .. } => {
+            E::App { r, name, sel, .. } => {
                 // The most frequent leaves, without the general application path: a state variable or a
                 // constant outside any instance context, and a local identifier bound to a plain value.
                 match r.get() {
@@ -1333,6 +1454,14 @@ impl Evaluator {
                                     if matches!(v, Value::Int(_) | Value::Bool(_) | Value::Str(_) | Value::Model(_) | Value::Tuple(_) | Value::Record(_) | Value::Fcn(_) | Value::Set(_)) {
                                         return Ok(v.clone());
                                     }
+                                    if let (Value::Thunk(lz), None) = (v, sel) {
+                                        // a delayed argument: force it here (as eval_app would after a second lookup)
+                                        let v = self.force(lz)?;
+                                        return match &v {
+                                            Value::LazyFcn(f) => f.force(self),
+                                            _ => Ok(v),
+                                        };
+                                    }
                                 }
                                 break;
                             }
@@ -1346,13 +1475,21 @@ impl Evaluator {
             E::Op(k, a) => self.eval_op_fast(n, *k, a, ctx),
             E::Num(v) => Ok(Value::Int(*v)),
             E::Bool(b) => Ok(Value::Bool(*b)),
+            E::Str(s, id) => Ok(Value::Str(self.str_node(s, id))),
             _ => self.eval_slow(n, ctx),
         }
     }
 
     #[inline(never)]
     fn eval_app_forced(&self, n: N, ctx: &C) -> R<Value> {
-        let v = self.eval_app(n, ctx)?;
+        let v = match &n.e {
+            // an application of a definition (user-defined or builtin): no need to look at the other cases
+            E::App { args, sel: None, r, .. } => match r.get() {
+                Res::Def(d) => self.apply_def(d, n, args, ctx)?,
+                _ => self.eval_app(n, ctx)?,
+            },
+            _ => self.eval_app(n, ctx)?,
+        };
         if let Value::LazyFcn(f) = &v {
             return f.force(self);
         }
@@ -1535,13 +1672,37 @@ impl Evaluator {
                 Ok(Value::Set(Rc::new(SetV::new(SetK::RecSet(Rc::new(idx.iter().map(|&i| fields[i].0).collect()), sets)))))
             }
             E::Except { base, updates } => {
-                let mut f = self.eval(base, ctx)?;
+                // (step-cache estimate: an EXCEPT on a variable reads the elements it replaces, when it uses them)
+                let pv = if self.steps.on.get() { plain_var(base, ctx) } else { None };
+                let mut f = match pv {
+                    Some(_) => self.steps_quiet(base, ctx)?,
+                    None => self.eval(base, ctx)?,
+                };
                 for (path, val) in updates {
-                    let mut p = Vec::with_capacity(path.len());
-                    for x in path {
-                        p.push(self.eval(x, ctx)?);
+                    // the keys of the path, on the stack when there are at most two (the usual case)
+                    let mut short: [Value; 2] = [Value::Undef, Value::Undef];
+                    let long: Vec<Value>;
+                    let p: &[Value] = if path.len() <= 2 {
+                        for (i, x) in path.iter().enumerate() {
+                            short[i] = self.eval(x, ctx)?;
+                        }
+                        &short[..path.len()]
+                    } else {
+                        let mut v = Vec::with_capacity(path.len());
+                        for x in path {
+                            v.push(self.eval(x, ctx)?);
+                        }
+                        long = v;
+                        &long
+                    };
+                    if let Some(i) = pv {
+                        let plain = path.len() == 1 && (matches!(val.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val.e, E::App { args, sel: None, .. } if args.is_empty()));
+                        if !plain {
+                            let old = self.apply_fcn(&f, &p[0], None).and_then(|o| value_word(&o));
+                            self.steps.elem(i as usize, value_word(&p[0]), old);
+                        }
                     }
-                    f = self.except_update(f, &p, 0, val, ctx, n)?;
+                    f = self.except_update(f, p, 0, val, ctx, n)?;
                 }
                 Ok(f)
             }
@@ -1599,6 +1760,17 @@ impl Evaluator {
             K::Eqv => Ok(Value::Bool(self.eval_bool(&a[0], ctx)? == self.eval_bool(&a[1], ctx)?)),
             K::Eq => Ok(Value::Bool(val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
             K::Ne => Ok(Value::Bool(!val_eq(&self.eval(&a[0], ctx)?, &self.eval(&a[1], ctx)?)?)),
+            K::In | K::NotIn if self.steps.on.get() && plain_var(&a[1], ctx).is_some() => {
+                // (step-cache estimate: x \in var reads one element)
+                let x = self.eval(&a[0], ctx)?;
+                let s = match self.steps_quiet(&a[1], ctx)? {
+                    Value::Set(s) => s,
+                    _ => return Ok(Value::Bool(self.eval_set(&a[1], ctx)?.contains(&x)? == (k == K::In))),
+                };
+                let r = s.contains(&x)?;
+                self.steps.elem(plain_var(&a[1], ctx).unwrap() as usize, value_word(&x), Ok(r as u64));
+                Ok(Value::Bool(r == (k == K::In)))
+            }
             K::In => {
                 let x = self.eval(&a[0], ctx)?;
                 Ok(Value::Bool(self.eval_set(&a[1], ctx)?.contains(&x)?))
@@ -1606,6 +1778,27 @@ impl Evaluator {
             K::NotIn => {
                 let x = self.eval(&a[0], ctx)?;
                 Ok(Value::Bool(!self.eval_set(&a[1], ctx)?.contains(&x)?))
+            }
+            K::Cup | K::Diff if self.steps.on.get() && plain_var(&a[0], ctx).is_some() => {
+                // (step-cache estimate: var \cup S and var \ S are changes to the variable, not reads of it)
+                let x = match self.steps_quiet(&a[0], ctx)? {
+                    Value::Set(s) => s,
+                    _ => self.eval_set(&a[0], ctx)?,
+                };
+                let y = self.eval_set(&a[1], ctx)?;
+                if k == K::Cup {
+                    return self.set_union(x, y);
+                }
+                if x.reducible() {
+                    let mut out = Vec::new();
+                    for e in x.elems()? {
+                        if !y.contains(e)? {
+                            out.push(e.clone());
+                        }
+                    }
+                    return Ok(SetV::of(out));
+                }
+                Ok(Value::Set(Rc::new(SetV::new(SetK::Diff(x, y)))))
             }
             K::Subseteq => {
                 let (mut x, mut y) = (self.eval_set(&a[0], ctx)?, self.eval_set(&a[1], ctx)?);
@@ -1684,12 +1877,22 @@ impl Evaluator {
                 mk_set(all)
             }
             K::Domain => {
-                let f = self.eval_fn_operand(&a[0], ctx)?;
+                let pv = if self.steps.on.get() { plain_var(&a[0], ctx) } else { None };
+                let f = match pv {
+                    Some(_) => self.steps_quiet(&a[0], ctx)?,
+                    None => self.eval_fn_operand(&a[0], ctx)?,
+                };
                 if let Value::LazyFcn(lf) = &f {
                     return Ok(Value::Set(lf.domain(self)?));
                 }
                 match domain_of(&f) {
-                    Some(d) => Ok(Value::Set(d)),
+                    Some(d) => {
+                        let d = Value::Set(d);
+                        if let Some(i) = pv {
+                            self.steps_domain(i as usize, &d);
+                        }
+                        Ok(d)
+                    }
                     None => self.fail(format!("Attempted to apply the operator DOMAIN to the non-function value\n{}", fmt(&f)), n),
                 }
             }
@@ -1799,7 +2002,7 @@ impl Evaluator {
         }
     }
     #[inline]
-    fn eval_fn_arg(&self, args: &'static [Node], ctx: &C) -> R<Value> {
+    pub(crate) fn eval_fn_arg(&self, args: &'static [Node], ctx: &C) -> R<Value> {
         if args.len() == 1 {
             return self.eval(&args[0], ctx);
         }
@@ -2086,6 +2289,10 @@ impl Evaluator {
         let last = i == path.len() - 1;
         let upd = |old: Value| -> R<Value> {
             if last {
+                if matches!(val_node.e, E::Num(_) | E::Bool(_) | E::Str(..)) || matches!(&val_node.e, E::App { args, sel: None, .. } if args.is_empty()) {
+                    // a literal or a name: `@` cannot occur in it, so it needs no binding
+                    return self.eval(val_node, ctx);
+                }
                 self.eval(val_node, &cons(self.at, old, ctx))
             } else {
                 self.except_update(old, path, i + 1, val_node, ctx, n)
@@ -2256,6 +2463,9 @@ impl Evaluator {
     // ---------- action / initial-predicate enumeration ----------
     /// Resolve an expression to a variable index if it denotes a variable (possibly through substitutions).
     pub fn as_var(&self, e: N, ctx: &C) -> R<i64> {
+        if let Some(i) = plain_var(e, ctx) {
+            return Ok(i);
+        }
         let mut e = e;
         let mut ctx = ctx.clone();
         for _ in 0..100 {
@@ -2332,6 +2542,12 @@ impl Evaluator {
         }
         if self.nxt.borrow().is_none() || self.prime_depth.get() > 0 {
             return Ok(-1);
+        }
+        match &lhs.e {
+            E::Op(K::Prime, a) => return self.as_var(&a[0], ctx),
+            E::Let { .. } => {}
+            E::App { args, .. } if args.is_empty() => {}
+            _ => return Ok(-1),
         }
         // look through operator parameters bound to primed variables, e.g. Send(p, d, mem, mem')
         let mut lhs = lhs;
@@ -2601,7 +2817,7 @@ impl Evaluator {
         Ok(())
     }
 
-    fn enum_conj(&self, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
+    pub(crate) fn enum_conj(&self, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
         if i == items.len() {
             return k();
         }
@@ -2613,6 +2829,89 @@ impl Evaluator {
 
     fn enum_unchanged(&self, e: N, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
         if let E::Op(K::Tuple, items) = &e.e {
+            // The usual shape, a tuple of variables: one pass instead of a continuation per variable.
+            let mut idxs = [0u32; 32];
+            let mut plain = items.len() <= 32;
+            if plain {
+                for (j, it) in items.iter().enumerate() {
+                    match plain_var(it, ctx) {
+                        Some(i) => idxs[j] = i as u32,
+                        None => {
+                            plain = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if plain {
+                let nxt = self.nxt.borrow().as_ref().unwrap().clone();
+                let cur = self.cur.borrow().clone();
+                let ids = &idxs[..items.len()];
+                // Nearly always: distinct variables, none assigned yet, all defined. Copy them over in one go.
+                let mut seen: u64 = 0;
+                let distinct = ids.iter().all(|&i| {
+                    let fresh = i < 64 && seen & (1 << i) == 0;
+                    seen |= 1 << (i & 63);
+                    fresh
+                });
+                if distinct && !Rc::ptr_eq(&nxt, &cur) && nxt.can_fill(&cur, ids) {
+                    nxt.fill(&cur, ids);
+                    drop(cur);
+                    self.st_touch.set(self.st_touch.get() + ids.len() as u64);
+                    self.n_assigned.set(self.n_assigned.get() + ids.len() as i64);
+                    let r = k();
+                    for &i in ids.iter().rev() {
+                        nxt.clear(i as usize);
+                    }
+                    self.n_assigned.set(self.n_assigned.get() - ids.len() as i64);
+                    return r;
+                }
+                let mut set: u32 = 0; // the items assigned here
+                let mut r: R<()> = Ok(());
+                let mut go_on = true;
+                for (j, it) in items.iter().enumerate() {
+                    let idx = idxs[j] as usize;
+                    if nxt.is_undef(idx) {
+                        let v = cur.get(idx);
+                        self.st_touch.set(self.st_touch.get() + 1);
+                        if matches!(v, Value::Undef) {
+                            r = self.at_node(undefined_ident(self.var_names.borrow().get(idx).copied().unwrap_or(self.at)), it);
+                            go_on = false;
+                            break;
+                        }
+                        nxt.set(idx, v);
+                        self.n_assigned.set(self.n_assigned.get() + 1);
+                        set |= 1 << j;
+                    } else {
+                        if self.steps.on.get() {
+                            self.steps.var(idx, &cur.get(idx), false);
+                        }
+                        match val_eq(&nxt.get(idx), &cur.get(idx)) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                go_on = false;
+                                break;
+                            }
+                            Err(e) => {
+                                r = Err(e);
+                                go_on = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                drop(cur);
+                if go_on {
+                    r = k();
+                }
+                for j in (0..items.len()).rev() {
+                    if set & (1 << j) != 0 {
+                        nxt.clear(idxs[j] as usize);
+                    }
+                }
+                self.n_assigned.set(self.n_assigned.get() - set.count_ones() as i64);
+                return r;
+            }
             fn go(ev: &Evaluator, items: &'static [Node], i: usize, ctx: &C, k: &mut dyn FnMut() -> R<()>) -> R<()> {
                 if i == items.len() {
                     return k();
@@ -2620,6 +2919,19 @@ impl Evaluator {
                 ev.enum_unchanged(&items[i], ctx, &mut || go(ev, items, i + 1, ctx, &mut *k))
             }
             return go(self, items, 0, ctx, k);
+        }
+        if let E::App { args, sel: None, r, .. } = &e.e {
+            // a name for a tuple of variables (UNCHANGED vars): straight to the tuple
+            if let (Res::Def(d), true) = (r.get(), args.is_empty()) {
+                let d = d.over.get().unwrap_or(d);
+                if d.builtin.get().is_none() && d.inst.is_none() && d.params.is_empty() {
+                    if let Some(body) = d.body.get() {
+                        if matches!(body.e, E::Op(K::Tuple, _)) {
+                            return self.enum_unchanged(body, &base_of(ctx), k);
+                        }
+                    }
+                }
+            }
         }
         if let E::App { .. } = &e.e {
             let idx = self.as_var(e, ctx)?;
@@ -2641,6 +2953,9 @@ impl Evaluator {
                     return r;
                 }
                 let old = if idx >= nv { self.eval(e, ctx)? } else { self.cur.borrow().get(idx) };
+                if self.steps.on.get() {
+                    self.steps.var(idx, &old, false);
+                }
                 if val_eq(&nxt.get(idx), &old)? {
                     return k();
                 }

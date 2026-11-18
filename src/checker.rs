@@ -133,6 +133,22 @@ impl FpSet {
             i = (i + 1) & self.mask;
         }
     }
+    /// Whether `fp` is in the set.
+    #[inline]
+    pub fn contains(&self, fp: u64) -> bool {
+        let fp = if fp == 0 { 0x9E37_79B9_7F4A_7C15 } else { fp };
+        let mut i = (fp as usize) & self.mask;
+        loop {
+            let k = self.keys[i];
+            if k == 0 {
+                return false;
+            }
+            if k == fp {
+                return true;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
     fn grow(&mut self) {
         let cap = self.keys.len() * 2;
         let ok = std::mem::replace(&mut self.keys, vec![0; cap]);
@@ -150,6 +166,57 @@ impl FpSet {
             self.ids[i] = oi[j];
         }
     }
+}
+
+// ---- state fingerprints ----
+// A state's fingerprint is `fp_finish` of the sum (mod 2^64) of one term per variable; a term mixes the
+// variable's index with the word of its value (`value_word`: content-based, cached inside composite values).
+// Being a sum, the fingerprint of a successor is its parent's with the terms of the changed variables
+// replaced, so unchanged variables cost one pointer comparison each.
+#[inline]
+fn mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+#[inline]
+fn var_term(i: usize, word: u64) -> u64 {
+    mix64(word ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+#[inline]
+fn fp_finish(sum: u64) -> u64 {
+    mix64(sum ^ 0x243F_6A88_85A3_08D3)
+}
+fn fp_sum(vals: &[Value]) -> R<u64> {
+    let mut sum = 0u64;
+    for (i, v) in vals.iter().enumerate() {
+        sum = sum.wrapping_add(var_term(i, value_word(v)?));
+    }
+    Ok(sum)
+}
+/// The two values are certainly equal: the same scalar or the same shared composite.
+#[inline]
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Model(x), Value::Model(y)) => x == y,
+        (Value::Tuple(x), Value::Tuple(y)) => Rc::ptr_eq(x, y),
+        (Value::Record(x), Value::Record(y)) => Rc::ptr_eq(x, y),
+        (Value::Fcn(x), Value::Fcn(y)) => Rc::ptr_eq(x, y),
+        (Value::Set(x), Value::Set(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// The fingerprint terms of the variables of a state whose successors are being fingerprinted.
+#[derive(Default)]
+pub(crate) struct ParentTerms {
+    term: Vec<u64>,
+    sum: u64,
 }
 
 /// Applies a model-value permutation; None when the value is unchanged.
@@ -233,13 +300,26 @@ pub struct Checker<'a> {
     pub(crate) t_start: f64,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) par: Option<Box<crate::par::Par>>,
+    /// Successors are kept as rows of a reusable buffer and a state is allocated only when its fingerprint
+    /// is new. Possible when nothing but the fingerprint set looks at a generated state: no CONSTRAINT,
+    /// ACTION_CONSTRAINT, VIEW, SYMMETRY, action property or recorded graph. EVERYSTATE_ENGINE=classic
+    /// switches it off (every successor is then allocated before it is looked up).
+    flat: bool,
 }
 
 pub const NO_PARENT: u32 = u32::MAX;
 
+/// EVERYSTATE_ENGINE=classic selects the code paths as they were before the data-layout work (for
+/// differential testing: both settings must give identical results).
+pub fn classic_engine() -> bool {
+    matches!(std::env::var("EVERYSTATE_ENGINE").as_deref(), Ok("classic"))
+}
+
 impl<'a> Checker<'a> {
     pub fn new(model: &'a Model, opts: CheckOptions) -> Checker<'a> {
         let ev = model.ev;
+        let opts_record = opts.record_graph;
+        ev.steps.enabled.set(std::env::var_os("EVERYSTATE_CACHE_STATS").is_some_and(|v| !v.is_empty() && v != "0"));
         ev.stats.active.set(true);
         ev.stats.check_deadlock.set(opts.check_deadlock);
         {
@@ -311,6 +391,13 @@ impl<'a> Checker<'a> {
             outdeg: vec![],
             cur_level: 0,
             empty: StateData::blank(0),
+            flat: !classic_engine()
+                && !opts_record
+                && model.constraints.is_empty()
+                && model.action_constraints.is_empty()
+                && model.implied_actions.is_empty()
+                && model.view.is_none()
+                && model.symmetry.is_none(),
             level_end: usize::MAX,
             last_progress: 0.0,
             t_start: 0.0,
@@ -438,20 +525,42 @@ impl<'a> Checker<'a> {
     }
 
     pub fn fingerprint(&self, s: &StateRef) -> R<u64> {
-        let mut h = Hasher::new();
-        if self.model.symmetry.is_none() && self.model.view.is_none() {
-            s.with(|vals| -> R<()> {
-                for v in &vals[..self.nvars] {
-                    h.value(v)?;
-                }
-                Ok(())
-            })?;
-        } else {
-            for v in self.fingerprint_input(s)? {
-                h.value(&v)?;
+        let sum = if self.model.symmetry.is_none() && self.model.view.is_none() { s.with(|vals| fp_sum(&vals[..self.nvars]))? } else { fp_sum(&self.fingerprint_input(s)?)? };
+        Ok(fp_finish(sum))
+    }
+
+    /// Successors can be kept as rows and looked up before a state is built for them (see `flat`).
+    pub(crate) fn is_flat(&self) -> bool {
+        self.flat
+    }
+    /// The terms of `s`, for `row_fingerprint`. (The state was fingerprinted when it was found: the words
+    /// of its values are cached.)
+    pub(crate) fn parent_terms(&self, s: &StateRef, pt: &mut ParentTerms) -> R<()> {
+        let nv = self.nvars;
+        pt.term.resize(nv, 0);
+        pt.sum = 0;
+        s.with(|pv| {
+            for k in 0..nv {
+                pt.term[k] = var_term(k, value_word(&pv[k])?);
+                pt.sum = pt.sum.wrapping_add(pt.term[k]);
             }
-        }
-        Ok(h.finish())
+            Ok(())
+        })
+    }
+    /// The fingerprint of a successor of `s` given as a row of variables (no VIEW, no SYMMETRY): the
+    /// fingerprint of `s` with the terms of the changed variables replaced. Equal to `fingerprint` of the
+    /// state with these variables.
+    #[inline]
+    pub(crate) fn row_fingerprint(&self, s: &StateRef, pt: &ParentTerms, row: &[Value]) -> R<u64> {
+        s.with(|pv| {
+            let mut sum = pt.sum;
+            for k in 0..self.nvars {
+                if !same_value(&row[k], &pv[k]) {
+                    sum = sum.wrapping_sub(pt.term[k]).wrapping_add(var_term(k, value_word(&row[k])?));
+                }
+            }
+            Ok(fp_finish(sum))
+        })
     }
 
     pub fn result(&self, status: &'static str) -> CheckResult {
@@ -531,9 +640,9 @@ impl<'a> Checker<'a> {
     pub fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
         let ev = self.ev;
         ev.trace_stack.borrow_mut().clear();
-        ev.tracing.set(true);
+        ev.set_tracing(true);
         let _ = self.eval_pred(p, s, t);
-        ev.tracing.set(false);
+        ev.set_tracing(false);
         let stack = std::mem::take(&mut *ev.trace_stack.borrow_mut());
         let mut lines: Vec<String> = vec![];
         let mut last: Option<N> = None;
@@ -791,6 +900,22 @@ impl<'a> Checker<'a> {
 
     // Successors of one state, as (state, action index) pairs in action order.
     pub fn successors(&self, s: &StateRef, out: &mut Vec<StateRef>, out_act: &mut Vec<u32>) -> R<()> {
+        let n = self.nvars;
+        self.successors_with(s, &mut |nxt, ai| {
+            out.push(StateData::new(nxt.snapshot(n)));
+            out_act.push(ai);
+        })
+    }
+    /// As `successors`, without allocating a state per successor: the variables of each successor are
+    /// appended to `out` (`nvars` values per successor).
+    pub(crate) fn successors_flat(&self, s: &StateRef, out: &mut Vec<Value>, out_act: &mut Vec<u32>) -> R<()> {
+        let n = self.nvars;
+        self.successors_with(s, &mut |nxt, ai| {
+            nxt.with(|v| out.extend_from_slice(&v[..n]));
+            out_act.push(ai);
+        })
+    }
+    fn successors_with(&self, s: &StateRef, emit: &mut dyn FnMut(&StateData, u32)) -> R<()> {
         let ev = self.ev;
         let m = self.model;
         let n = self.nvars;
@@ -808,9 +933,9 @@ impl<'a> Checker<'a> {
             ev.prime_depth.set(0);
             ev.call_depth.set(0);
             ev.n_assigned.set(0);
-            ev.enumerate(a.e, &a.ctx, &mut || {
-                for k in 0..n {
-                    if nxt.is_undef(k) {
+            let mut found = || {
+                if !nxt.all_defined(n) {
+                    {
                         let missing = self.missing(&nxt);
                         let which = if actions.len() == 1 { "the next-state action".to_string() } else { format!("action {} of the next-state relation", a.name) };
                         return Err(Box::new(Fail::Check {
@@ -824,10 +949,14 @@ impl<'a> Checker<'a> {
                         }));
                     }
                 }
-                out.push(StateData::new(nxt.snapshot(n)));
-                out_act.push(ai as u32);
+                emit(nxt, ai as u32);
                 Ok(())
-            })?;
+            };
+            if ev.steps.enabled.get() {
+                ev.enumerate_units(ai, a.e, &a.ctx, &mut found)?;
+            } else {
+                ev.enumerate(a.e, &a.ctx, &mut found)?;
+            }
         }
         Ok(())
     }
@@ -836,6 +965,11 @@ impl<'a> Checker<'a> {
         let r = self.search(events);
         #[cfg(not(target_arch = "wasm32"))]
         crate::par::finish(self);
+        if self.ev.steps.enabled.get() {
+            let m = self.model;
+            let report = self.ev.steps.report(&|ai| format!("{}{}", m.actions[ai].name, m.actions[ai].params));
+            eprint!("{}", report);
+        }
         r
     }
 
@@ -853,6 +987,12 @@ impl<'a> Checker<'a> {
         events.init_done(self.init_generated, self.init_distinct);
         let mut succs: Vec<StateRef> = vec![];
         let mut succ_act: Vec<u32> = vec![];
+        let flat = self.flat;
+        let nv = self.nvars;
+        // flat mode: the variables of all successors of the current state, and the fingerprint terms of
+        // the current state's variables
+        let mut rows: Vec<Value> = vec![];
+        let mut pterms = ParentTerms::default();
         let record = self.opts.record_graph;
         let ev = self.ev;
         self.last_progress = ev.host.borrow().now_ms();
@@ -882,7 +1022,9 @@ impl<'a> Checker<'a> {
             self.sync_stats();
             succs.clear();
             succ_act.clear();
-            if let Err(e) = self.successors(&s, &mut succs, &mut succ_act) {
+            rows.clear();
+            let generated = if flat { self.successors_flat(&s, &mut rows, &mut succ_act) } else { self.successors(&s, &mut succs, &mut succ_act) };
+            if let Err(e) = generated {
                 return match *e {
                     Fail::Check { status, message } => {
                         let mut r = self.result(status);
@@ -897,11 +1039,28 @@ impl<'a> Checker<'a> {
             let extra = ev.extra_generated.replace(0);
             self.generated += extra;
             let mut fresh = 0u32;
-            for i in 0..succs.len() {
-                let t = succs[i].clone();
+            if flat && !succ_act.is_empty() {
+                if let Err(e) = self.parent_terms(&s, &mut pterms) {
+                    return self.error(self.describe_err(&e, true), Some(self.trace_to(sid)));
+                }
+            }
+            for i in 0..succ_act.len() {
                 let ai = succ_act[i] as usize;
                 self.generated += 1;
                 ev.stats.generated.set(self.generated as i64);
+                let mut known_fp: Option<u64> = None;
+                let t = if flat {
+                    let row = &rows[i * nv..(i + 1) * nv];
+                    match self.row_fingerprint(&s, &pterms, row) {
+                        // seen before: nothing else looks at this successor, so no state is built for it
+                        Ok(fp) if self.fps.contains(fp) => continue,
+                        Ok(fp) => known_fp = Some(fp),
+                        Err(_) => {} // reported below, as when every successor is a state
+                    }
+                    StateData::new(row.to_vec())
+                } else {
+                    succs[i].clone()
+                };
                 let mut in_model = true;
                 let mut unseen = true;
                 let mut id: i64 = -1;
@@ -924,7 +1083,10 @@ impl<'a> Checker<'a> {
                     }
                     self.set_level(lvl + 1);
                     if in_model {
-                        let fp = self.fingerprint(&t)?;
+                        let fp = match known_fp {
+                            Some(fp) => fp,
+                            None => self.fingerprint(&t)?,
+                        };
                         let nid = self.states.len();
                         match self.fps.put(fp, nid as u32) {
                             None => {
@@ -1013,7 +1175,7 @@ impl<'a> Checker<'a> {
                 }
             }
             self.outdeg.push(fresh);
-            if succs.is_empty() && self.opts.check_deadlock {
+            if succ_act.is_empty() && self.opts.check_deadlock {
                 let mut r = self.result("deadlock");
                 r.trace = Some(self.trace_to(sid));
                 return r;

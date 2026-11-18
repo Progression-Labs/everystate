@@ -1,0 +1,131 @@
+{
+ "at": "2026-11-17T23:34:25.720Z",
+ "everystate": "/home/user/verify.js/.claude/worktrees/agent-a47dcb3a27a2b552b/.study/everystate-base",
+ "load": [
+  8.56,
+  7.84,
+  8.58
+ ],
+ "rows": [
+  {
+   "model": "TCommit",
+   "status": "ok",
+   "distinct": 34,
+   "generated": 94,
+   "cpuS": 0.003246,
+   "minCpuS": 0.002925,
+   "rssMb": 20,
+   "load": 8.05
+  },
+  {
+   "model": "ACP_SB_TLC",
+   "status": "ok",
+   "distinct": 54944,
+   "generated": 218352,
+   "cpuS": 0.308514,
+   "minCpuS": 0.306073,
+   "rssMb": 28,
+   "load": 8.05
+  },
+  {
+   "model": "StaleShrinkV6Wait2x",
+   "status": "ok",
+   "distinct": 43348,
+   "generated": 111445,
+   "cpuS": 0.319891,
+   "minCpuS": 0.281171,
+   "rssMb": 28,
+   "load": 8.05
+  },
+  {
+   "model": "Barriers",
+   "status": "ok",
+   "distinct": 29279,
+   "generated": 104515,
+   "cpuS": 1.950851,
+   "minCpuS": 1.909447,
+   "rssMb": 21,
+   "load": 7.72
+  },
+  {
+   "model": "SimpleRegular",
+   "status": "ok",
+   "distinct": 277726,
+   "generated": 1454776,
+   "cpuS": 3.764353,
+   "minCpuS": 3.756296,
+   "rssMb": 178,
+   "load": 7.17
+  },
+  {
+   "model": "Paxos",
+   "status": "ok",
+   "distinct": 1207,
+   "generated": 13290,
+   "cpuS": 0.72471,
+   "minCpuS": 0.717769,
+   "rssMb": 52,
+   "load": 7.17
+  },
+  {
+   "model": "VoteProof",
+   "status": "ok",
+   "distinct": 6962,
+   "generated": 318877,
+   "cpuS": 5.331771,
+   "minCpuS": 5.138559,
+   "rssMb": 22,
+   "load": 7.18
+  },
+  {
+   "model": "MCNanoMedium",
+   "status": "ok",
+   "distinct": 530587,
+   "generated": 1120079,
+   "cpuS": 13.295166,
+   "minCpuS": 13.043733,
+   "rssMb": 616,
+   "load": 7.63
+  },
+  {
+   "model": "MCBakery",
+   "status": "ok",
+   "distinct": 655200,
+   "generated": 3403584,
+   "cpuS": 7.622586,
+   "minCpuS": 7.289967,
+   "rssMb": 213,
+   "load": 7.32
+  },
+  {
+   "model": "MCLamportMutex",
+   "status": "ok",
+   "distinct": 724274,
+   "generated": 2729079,
+   "cpuS": 11.573878,
+   "minCpuS": 11.544253,
+   "rssMb": 532,
+   "load": 6.33
+  },
+  {
+   "model": "MCbtree",
+   "status": "ok",
+   "distinct": 374727,
+   "generated": 2820091,
+   "cpuS": 11.264203,
+   "minCpuS": 11.155992,
+   "rssMb": 193,
+   "load": 8.19
+  },
+  {
+   "model": "GameOfLife",
+   "status": "ok",
+   "distinct": 65536,
+   "generated": 131072,
+   "cpuS": 8.784692,
+   "minCpuS": 8.380501,
+   "rssMb": 40,
+   "load": 8.56
+  }
+ ]
+}
