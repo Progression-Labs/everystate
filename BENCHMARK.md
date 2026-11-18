@@ -338,3 +338,20 @@ assumed to be used only as that variable's new value). `node scripts/cache-stats
 | MCNanoMedium / StaleShrinkV6Wait2x / VoteProof | 93.7 % / 88.1 % / 82.8 % |
 | GameOfLife (one action that reads the whole grid) | 0 % |
 | 44 Examples models with at least 20,000 evaluations | 23 at 99 % or more, 9 between 95 and 99 %, 7 between 80 and 95 %, 5 below (MCCRDT 49 %, MCReplicatedLog 69 %, SlidingPuzzles, CoffeeCan, GameOfLife 0 %) |
+
+**After merging parallel workers** (`main` at c1544c8): the fingerprint is the same in every thread
+(string hashes are per-thread tables filled from the text), and the workers' expansion uses the same
+flat path as the sequential loop. A third series on the same machine (`bench/steps-merged.json`, CPU
+seconds summed, median of 5; this series ran on a faster host than the two above, compare within a row only):
+
+| build | five larger models | 11 corpus configurations | 12 models of the table above |
+|---|---:|---:|---:|
+| before this pass (31e8065) | 19.17 | 3.55 | 65.40 |
+| `main` with workers (c1544c8), 1 worker | 19.01 | 3.59 | 67.30 |
+| merged, 1 worker | 15.02 | 2.75 | 63.16 |
+
+No model of the 12 is slower than on `main` (Barriers 1.96 s to 2.00 s is within the noise; GameOfLife
+9.11 s to 8.36 s, VoteProof 5.45 s to 5.32 s). With 4 workers (`bench/workers-ab.json`, wall seconds,
+median of 3, `main` / merged): OrSet with 4 faults 2.16 / 1.90 (1 worker: 7.13 / 5.98), ReadRepair
+2.07 / 1.61 (6.63 / 5.04), LostUpdate 1.64 / 1.38 (5.59 / 4.22), LeaseLock 0.47 / 0.40 (1.53 / 1.20):
+the speed-up from 1 to 4 workers stays at 3.0 to 3.1 times.
