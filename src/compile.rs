@@ -123,8 +123,12 @@ fn fb_act(node: N, sc: &Rc<Sc>) -> AE {
 
 #[inline]
 fn truth(v: Value) -> R<bool> {
-    match v {
-        Value::Bool(b) => Ok(b),
+    match &v {
+        Value::Bool(b) => {
+            let b = *b;
+            std::mem::forget(v); // nothing to drop: spares the call of the drop glue
+            Ok(b)
+        }
         _ => bail(),
     }
 }
@@ -233,14 +237,34 @@ struct Comp {
 struct One {
     bag: bool,
     elem: Rc<CE>,
-    clear: Vec<usize>,
+    clear: Vec<PreOp>,
+}
+/// What happens when an inlined call (or a LET) is entered, before its body.
+#[derive(Clone, Copy)]
+enum PreOp {
+    /// forget the value kept for a by-name binding
+    Clear(usize),
+    /// a string literal passed as an argument: the tree-walker evaluates it when it binds the parameter,
+    /// which is when the string gets its number if it is new
+    Intern(N),
+}
+#[inline]
+fn run_pre(pre: &[PreOp], cx: &Cx) {
+    for op in pre {
+        match op {
+            PreOp::Clear(s) => cx.f.clear(*s),
+            PreOp::Intern(n) => {
+                if let E::Str(s, id) = &n.e {
+                    cx.ev.str_node(s, id);
+                }
+            }
+        }
+    }
 }
 impl One {
     #[inline]
     fn eval(&self, cx: &Cx) -> R<Value> {
-        for &s in &self.clear {
-            cx.f.clear(s);
-        }
+        run_pre(&self.clear, cx);
         (self.elem)(cx)
     }
 }
@@ -369,7 +393,7 @@ impl Comp {
 
     /// The scope and prologue for inlining a definition: its parameters bound by name to the arguments.
     /// `base` is the scope the body sees under its parameters. None when the call cannot be inlined.
-    fn bind_args(&mut self, params: &'static [Param], args: &'static [Node], base: Rc<Sc>, sc: &Rc<Sc>) -> Option<(Rc<Sc>, Vec<usize>)> {
+    fn bind_args(&mut self, params: &'static [Param], args: &'static [Node], base: Rc<Sc>, sc: &Rc<Sc>) -> Option<(Rc<Sc>, Vec<PreOp>)> {
         if params.len() != args.len() || params.iter().any(|p| p.arity != 0) {
             return None;
         }
@@ -391,9 +415,12 @@ impl Comp {
                     // (not worth it for a string or a name that is itself a slot or a constant)
                     let trivial = matches!(a.e, E::Str(..))
                         || matches!(&a.e, E::App { name, args, sel: None, r, .. } if args.is_empty() && matches!(r.get(), Res::Local) && matches!(lookup(sc, *name), Found::Slot(_) | Found::Const(_)));
+                    if matches!(a.e, E::Str(..)) {
+                        clear.push(PreOp::Intern(a));
+                    }
                     let cache = if stable && !trivial {
                         let s = self.slot();
-                        clear.push(s);
+                        clear.push(PreOp::Clear(s));
                         Some(s)
                     } else {
                         None
@@ -451,7 +478,7 @@ impl Comp {
     }
 
     /// The scope of a LET body: one node per definition, as the tree-walker's `bind_let`.
-    fn let_scope(&mut self, defs: &'static [LetDef], sc: &Rc<Sc>) -> Option<(Rc<Sc>, Vec<usize>)> {
+    fn let_scope(&mut self, defs: &'static [LetDef], sc: &Rc<Sc>) -> Option<(Rc<Sc>, Vec<PreOp>)> {
         let mut inner = sc.clone();
         let mut clear = vec![];
         let n = defs.len();
@@ -461,7 +488,7 @@ impl Comp {
                 LetDef::Inst(_) => return None,
             };
             let cache = self.slot();
-            clear.push(cache);
+            clear.push(PreOp::Clear(cache));
             inner = push(&inner, ScK::Let { d, defs, below: sc.clone(), head: i + 1 == n, cache, ce: RefCell::new(None), root: false });
         }
         if n == 0 {
@@ -509,7 +536,7 @@ impl Comp {
     }
     /// Passes the shape of an inlined body on to the caller of the inlining: the slots of the call are
     /// reset before the element is computed.
-    fn keep_shape(&mut self, clear: &[usize]) {
+    fn keep_shape(&mut self, clear: &[PreOp]) {
         if let Some(sh) = &mut self.shape {
             sh.clear.extend_from_slice(clear);
             self.shape_ok = true;
@@ -968,6 +995,8 @@ impl Comp {
                 let y = y(cx)?;
                 if let (Value::Int(a), Value::Int(b)) = (&x, &y) {
                     let (a, b) = (*a, *b);
+                    std::mem::forget(x); // two integers: nothing to drop
+                    std::mem::forget(y);
                     match arith {
                         1 | 2 => {
                             let r = if arith == 1 { a.checked_add(b) } else { a.checked_sub(b) };
@@ -982,6 +1011,8 @@ impl Comp {
                         5 => return Ok(Value::Bool(a <= b)),
                         _ => return Ok(Value::Bool(a >= b)),
                     }
+                    // out of range: the operator itself reports it
+                    return cx.ev.call_builtin(bi, &[Value::Int(a), Value::Int(b)]);
                 }
                 cx.ev.call_builtin(bi, &[x, y])
             });
@@ -1417,9 +1448,7 @@ impl Comp {
                 Some((inner, clear)) => {
                     let body = self.act_inner(body, &inner);
                     Box::new(move |cx, k| {
-                        for &s in &clear {
-                            cx.f.clear(s);
-                        }
+                        run_pre(&clear, cx);
                         body(cx, k)
                     })
                 }
@@ -1450,9 +1479,7 @@ impl Comp {
                                 let b = self.act_inner(body, &inner);
                                 self.stack.pop();
                                 Box::new(move |cx, k| {
-                                    for &s in &clear {
-                                        cx.f.clear(s);
-                                    }
+                                    run_pre(&clear, cx);
                                     b(cx, k)
                                 })
                             }
@@ -1483,14 +1510,12 @@ impl Comp {
     }
 }
 
-fn with_clear(clear: Vec<usize>, body: CE) -> CE {
+fn with_clear(clear: Vec<PreOp>, body: CE) -> CE {
     if clear.is_empty() {
         return body;
     }
     Box::new(move |cx| {
-        for &s in &clear {
-            cx.f.clear(s);
-        }
+        run_pre(&clear, cx);
         body(cx)
     })
 }
@@ -1498,7 +1523,7 @@ fn with_clear(clear: Vec<usize>, body: CE) -> CE {
 /// The scope for the context a top-level action or invariant starts from: plain values and LET
 /// definitions (an action that was split out of a LET). None when the context holds anything else, or a
 /// LET definition that may reach an operator with an effect. Also the slots to clear at each evaluation.
-fn root_scope(ctx: &C, c: &mut Comp, seen: &mut HashSet<usize>) -> Option<(Rc<Sc>, Vec<usize>)> {
+fn root_scope(ctx: &C, c: &mut Comp, seen: &mut HashSet<usize>) -> Option<(Rc<Sc>, Vec<PreOp>)> {
     let mut nodes: Vec<&Rc<Ctx>> = vec![];
     let mut cur = ctx.as_ref();
     while let Some(node) = cur {
@@ -1518,7 +1543,7 @@ fn root_scope(ctx: &C, c: &mut Comp, seen: &mut HashSet<usize>) -> Option<(Rc<Sc
                     return None;
                 }
                 let cache = c.slot();
-                clear.push(cache);
+                clear.push(PreOp::Clear(cache));
                 ScK::Let { d, defs: &[], below: sc.clone(), head: node.let_head, cache, ce: RefCell::new(None), root: true }
             }
             _ => return None,
@@ -1579,9 +1604,7 @@ pub fn compile(model: &crate::model::Model) -> Plans {
             body
         } else {
             Box::new(move |cx, k| {
-                for &s in &clear {
-                    cx.f.clear(s);
-                }
+                run_pre(&clear, cx);
                 body(cx, k)
             })
         };
