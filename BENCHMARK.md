@@ -8,6 +8,32 @@ Engines compared, one worker each, doing the same breadth-first check of the sam
 
 All engines must report the same generated / distinct state counts (`counts agree` column).
 
+## Result (2026-11-18, version 0.4.0)
+
+Median wall-clock seconds of 3 runs of the whole process (start-up, parsing and checking), one worker
+each, the runs strictly sequential with nothing else running (load average about 1). "Rust vs TLC" is
+TLC's time divided by Rust's: above 1 means everystate is faster. It is faster than single-worker TLC
+on every row, by 1.3x to 5.7x on the models that run long enough to measure (TCommit is start-up only).
+The default engine is used: the compiled evaluator, no step cache.
+
+| model | distinct | generated | Rust s | Rust/WASM (Node) s | TLC (1 worker) s | Rust states/s | TLC states/s | Rust vs TLC | RSS Rust MB | counts agree |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| TCommit (tiny (startup)) | 34 | 94 | 0.01 | 0.08 | 0.51 | 18,683 | 186 | 100.6x | 12 | yes |
+| ACP_SB_TLC (sets, quantifiers) | 54944 | 218352 | 0.22 | 0.64 | 1.25 | 985,016 | 174,177 | 5.7x | 28 | yes |
+| StaleShrinkV6Wait2x (records) | 43348 | 111445 | 0.22 | 0.69 | 1.23 | 515,009 | 90,618 | 5.7x | 28 | yes |
+| Barriers (functions (PlusCal)) | 29279 | 104515 | 1.47 | 2.54 | 3.09 | 71,018 | 33,858 | 2.1x | 21 | yes |
+| SimpleRegular (functions (PlusCal)) | 277726 | 1454776 | 2.77 | 6.77 | 4.33 | 525,405 | 335,618 | 1.6x | 178 | yes |
+| Paxos (symmetry, sets of records) | 1207 | 13290 | 0.65 | 1.27 | 1.51 | 20,313 | 8,830 | 2.3x | 52 | yes |
+| VoteProof (set heavy, quantifiers) | 6962 | 318877 | 4.21 | 8.28 | 9.87 | 75,820 | 32,314 | 2.3x | 16 | yes |
+| MCNanoMedium (VIEW, records, sets) | 530587 | 1120079 | 10.89 | 24.62 | 15.07 | 102,895 | 74,324 | 1.4x | 616 | yes |
+| MCBakery (functions (PlusCal)) | 655200 | 3403584 | 5.80 | 11.44 | 8.31 | 587,044 | 409,498 | 1.4x | 213 | yes |
+| MCLamportMutex (functions of sequences) | 724274 | 2729079 | 8.51 | 20.85 | 11.74 | 320,512 | 232,554 | 1.4x | 532 | yes |
+| MCbtree (function / set heavy) | 374727 | 2820091 | 8.45 | 17.13 | 25.76 | 333,916 | 109,457 | 3.1x | 193 | yes |
+| GameOfLife (recursive operators, functions) | 65536 | 131072 | 6.93 | 13.43 | 8.99 | 18,911 | 14,584 | 1.3x | 36 | yes |
+
+The raw per-run times are in `bench-last.log`. Machine, versions and commands are as described below;
+the sections that follow are earlier measurements, kept for the history.
+
 ## Result (2026-11-14, after the performance pass)
 
 Median wall-clock seconds of 3 runs of the whole process (start-up, parsing and checking).

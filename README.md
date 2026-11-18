@@ -234,8 +234,8 @@ Real TLC is the reference (details in [CONFORMANCE.md](CONFORMANCE.md)):
 - TLC's own `test-model` suite, run side by side with `tla2tools.jar`: 383 of 414 match.
 - pstack `statechart` corpus: 33 of 33 outputs byte-identical.
 
-Faster than single-worker Java TLC on all 12 benchmark models (1.1x to 4.6x, thin on three of
-them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
+Faster than single-worker Java TLC on all 12 benchmark models (1.3x to 5.7x), with near-instant
+start-up: [BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
