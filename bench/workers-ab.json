@@ -1,0 +1,154 @@
+{
+ "load": [
+  1.3701171875,
+  1.1767578125,
+  1.06396484375
+ ],
+ "runs": 3,
+ "rows": [
+  {
+   "model": "OrSet-fixed-f4",
+   "workers": "1",
+   "es-main-c1544c8": {
+    "wallS": 7.13,
+    "cpuS": 7.01,
+    "rssMb": 385,
+    "distinct": 524832,
+    "generated": 2983987
+   },
+   "es-5-merged": {
+    "wallS": 5.98,
+    "cpuS": 5.83,
+    "rssMb": 394,
+    "distinct": 524832,
+    "generated": 2983987
+   }
+  },
+  {
+   "model": "OrSet-fixed-f4",
+   "workers": "4",
+   "es-main-c1544c8": {
+    "wallS": 2.16,
+    "cpuS": 7.57,
+    "rssMb": 247,
+    "distinct": 524832,
+    "generated": 2983987
+   },
+   "es-5-merged": {
+    "wallS": 1.9,
+    "cpuS": 6.52,
+    "rssMb": 249,
+    "distinct": 524832,
+    "generated": 2983987
+   }
+  },
+  {
+   "model": "ReadRepair-fixed-f6",
+   "workers": "1",
+   "es-main-c1544c8": {
+    "wallS": 6.63,
+    "cpuS": 6.56,
+    "rssMb": 227,
+    "distinct": 383579,
+    "generated": 2917394
+   },
+   "es-5-merged": {
+    "wallS": 5.04,
+    "cpuS": 4.95,
+    "rssMb": 235,
+    "distinct": 383579,
+    "generated": 2917394
+   }
+  },
+  {
+   "model": "ReadRepair-fixed-f6",
+   "workers": "4",
+   "es-main-c1544c8": {
+    "wallS": 2.07,
+    "cpuS": 7.52,
+    "rssMb": 174,
+    "distinct": 383579,
+    "generated": 2917394
+   },
+   "es-5-merged": {
+    "wallS": 1.61,
+    "cpuS": 5.43,
+    "rssMb": 170,
+    "distinct": 383579,
+    "generated": 2917394
+   }
+  },
+  {
+   "model": "LostUpdate-fixed-f6",
+   "workers": "1",
+   "es-main-c1544c8": {
+    "wallS": 5.59,
+    "cpuS": 5.57,
+    "rssMb": 225,
+    "distinct": 420646,
+    "generated": 2449693
+   },
+   "es-5-merged": {
+    "wallS": 4.22,
+    "cpuS": 4.16,
+    "rssMb": 231,
+    "distinct": 420646,
+    "generated": 2449693
+   }
+  },
+  {
+   "model": "LostUpdate-fixed-f6",
+   "workers": "4",
+   "es-main-c1544c8": {
+    "wallS": 1.64,
+    "cpuS": 5.85,
+    "rssMb": 139,
+    "distinct": 420646,
+    "generated": 2449693
+   },
+   "es-5-merged": {
+    "wallS": 1.38,
+    "cpuS": 4.57,
+    "rssMb": 137,
+    "distinct": 420646,
+    "generated": 2449693
+   }
+  },
+  {
+   "model": "LeaseLock-fixed-f5",
+   "workers": "1",
+   "es-main-c1544c8": {
+    "wallS": 1.53,
+    "cpuS": 1.51,
+    "rssMb": 76,
+    "distinct": 122728,
+    "generated": 732907
+   },
+   "es-5-merged": {
+    "wallS": 1.2,
+    "cpuS": 1.17,
+    "rssMb": 78,
+    "distinct": 122728,
+    "generated": 732907
+   }
+  },
+  {
+   "model": "LeaseLock-fixed-f5",
+   "workers": "4",
+   "es-main-c1544c8": {
+    "wallS": 0.47,
+    "cpuS": 1.43,
+    "rssMb": 78,
+    "distinct": 122728,
+    "generated": 732907
+   },
+   "es-5-merged": {
+    "wallS": 0.4,
+    "cpuS": 1.24,
+    "rssMb": 78,
+    "distinct": 122728,
+    "generated": 732907
+   }
+  }
+ ]
+}
