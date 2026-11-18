@@ -40,7 +40,7 @@ Also available: `everystate pcal Spec.tla` translates a PlusCal algorithm in the
 as the Java translator), and `everystate -simulate num=10000 Spec.tla` checks random behaviours
 when a model is too large to enumerate (a pass then covers only the behaviours generated).
 
-Not supported: multiple workers, TLAPS proofs. Exhaustive checking needs a model that is finite and
+Add `-workers auto` to search on every core (same results). Not supported: TLAPS proofs. Exhaustive checking needs a model that is finite and
 small enough to enumerate; a few million states is fine.
 
 ## How to do it

@@ -28,6 +28,7 @@ TLC `.cfg` files, checks every reachable state, and reports results in TLC's for
 - TLC-compatible text output, exit codes, `-tool` framing and `-dump`.
 - Random simulation (`-simulate`) for models too large to enumerate, with seeded, reproducible runs.
 - Trace conformance (`everystate conform`): check a log of the real system against the spec.
+- Parallel search (`-workers N`) with results identical to one worker.
 - A PlusCal translator (`everystate pcal`) with the Java translator's output, byte for byte.
 - The standard and community modules are built in.
 - One native binary, or WebAssembly for Node, Bun and workers.
@@ -118,6 +119,15 @@ result.name;     // 'NeverFour'
 `checkAsync` runs the same check in a worker with a large stack, for deeply recursive specs.
 The WebAssembly build is about 2x slower than native and cannot use the file-based community
 operators.
+
+## Multiple workers
+
+`-workers N` (or `-workers auto`, one per core) searches on N threads in the native binary. State
+counts, depth, verdict and the counterexample are the same as with one worker. Operators whose
+effect depends on exploration order (`Print`, `TLCSet`/`TLCGet` registers, `RandomElement`,
+IOUtils, ...) are evaluated by the sequential search; if they occur repeatedly the run continues
+with one worker and says so. Liveness checking, simulation and `conform` run on one thread, and
+the WebAssembly build is single-threaded.
 
 ## Simulation
 
@@ -224,7 +234,7 @@ them), with near-instant start-up: [BENCHMARK.md](BENCHMARK.md).
 
 ## Not supported
 
-Multiple workers, disk-backed state storage (everything is in memory, so a few
+Disk-backed state storage (everything is in memory, so a few
 million distinct states is the practical limit), Java module overrides, labels and subexpression selectors, and TLAPS proof checking (proofs
 are parsed and skipped).
 

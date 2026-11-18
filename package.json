@@ -28,7 +28,7 @@
   ],
   "scripts": {
     "build": "cargo build --release && sh wasm/build.sh",
-    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts && node test/community.mjs",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts && node test/community.mjs && node test/workers.mjs",
     "conformance:examples": "node scripts/conformance.mjs",
     "conformance:tlc": "node scripts/diff-tlc.mjs",
     "conformance:statechart": "node scripts/statechart-corpus.mjs",
