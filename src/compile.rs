@@ -22,6 +22,7 @@ use crate::ast::*;
 use crate::eval::*;
 use crate::intern::*;
 use crate::modules::{for_children, level_of, tail_fn, BFn, Builtin, Def};
+use crate::stepcache::{self as sc_, DOp, Entry, Leaf, Loc, Table, Tmpl, Write};
 use crate::value::*;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
@@ -36,6 +37,77 @@ pub struct Cx<'a> {
     pub nxt: &'a StateData,
     pub nv: i64,
     pub fallbacks: &'a Cell<u64>,
+    /// the step cache (stepcache.rs), when it is on; `rec_on` while a unit's evaluation is being recorded
+    pub cache: Option<&'a RefCell<Table>>,
+    pub rec_on: &'a Cell<bool>,
+    pub rec: &'a RefCell<Rec>,
+}
+/// What the evaluation of a unit read and did, noted for the step cache.
+#[derive(Default)]
+pub struct Rec {
+    reads: Vec<(Loc, Value)>,
+    /// something happened that an entry cannot describe
+    bad: bool,
+    /// per variable: the changes that turn the parent's value into the value now assigned (None: the value
+    /// was computed some other way)
+    delta: Vec<Option<Vec<DOp>>>,
+    succs: Vec<Vec<Write>>,
+}
+/// A program that, for an expression known to compute a change of one variable's value, produces the
+/// changes instead of the value (false: not expressible this time).
+type DProg = dyn Fn(&Cx, &mut Vec<DOp>) -> R<bool>;
+#[derive(Clone)]
+struct DShape {
+    var: usize,
+    /// the expression is the variable itself
+    direct: bool,
+    prog: Rc<DProg>,
+}
+/// The parent's value of a variable after the changes; None when one of them cannot be applied.
+fn apply_ops(cx: &Cx, parent: &Value, ops: &[DOp], n: N) -> Option<Value> {
+    let mut v = parent.clone();
+    for op in ops {
+        v = match op {
+            DOp::Bag { e, plus } => crate::stdlib::bag_one(&v, e, *plus)?,
+            DOp::Set { e, add } => match &v {
+                Value::Set(s) => set_one(s, e, *add)?,
+                _ => return None,
+            },
+            DOp::Exc { path, v: nv } => {
+                let mut hit = false;
+                let r = cx
+                    .ev
+                    .except_with(
+                        v,
+                        path,
+                        0,
+                        &mut |_| {
+                            hit = true;
+                            Ok(nv.clone())
+                        },
+                        n,
+                    )
+                    .ok()?;
+                if !hit {
+                    return None;
+                }
+                r
+            }
+        };
+    }
+    Some(v)
+}
+fn uses_at(n: N) -> bool {
+    if matches!(n.e, E::At) {
+        return true;
+    }
+    let mut r = false;
+    for_children(n, &mut |c| {
+        if !r && uses_at(c) {
+            r = true;
+        }
+    });
+    r
 }
 type CE = Box<dyn Fn(&Cx) -> R<Value>>;
 type AE = Box<dyn Fn(&Cx, &mut dyn FnMut() -> R<()>) -> R<()>>;
@@ -329,7 +401,29 @@ struct Comp {
     /// of `expr0` that leave a shape for their caller
     shape: Option<One>,
     shape_ok: bool,
+    /// likewise, the expression just compiled computes a change of a variable's value
+    dshape: Option<DShape>,
+    dshape_ok: bool,
+    /// the step cache is on: units are marked out (`top`: still above the units; `descend`: the node being
+    /// compiled passes `top` on to its parts)
+    cache: bool,
+    top: bool,
+    descend: bool,
+    /// every slot that keeps the value of a by-name binding
+    cache_slots: Vec<usize>,
+    /// the slots of the variables bound by the existential quantifiers above the units
+    top_slots: Vec<usize>,
+    units: u32,
+    unit_stats: Vec<Rc<UnitStat>>,
+    plan_id: u32,
 }
+pub struct UnitStat {
+    loc: Loc4,
+    lookups: Cell<u64>,
+    hits: Cell<u64>,
+    off: Cell<bool>,
+}
+type Loc4 = [u32; 4];
 
 /// The expression just compiled is `{e}` or `SetToBag({e})`, possibly behind inlined definitions:
 /// `elem` computes `e` after the slots in `clear` are reset. Consumers (`S \cup {e}`, `S \ {e}`,
@@ -530,6 +624,9 @@ fn var_of(n: N) -> Option<usize> {
 }
 
 impl Comp {
+    fn new(cache: bool, plan_id: u32) -> Comp {
+        Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false, shape: None, shape_ok: false, dshape: None, dshape_ok: false, cache, top: false, descend: false, cache_slots: vec![], top_slots: vec![], units: 0, unit_stats: vec![], plan_id }
+    }
     /// The compiled bounds of a quantifier and the scope of its body. None when a bound has no set.
     fn bounds(&mut self, bounds: &'static [Bound], sc: &Rc<Sc>) -> Option<(Bnds, Rc<Sc>)> {
         if bounds.iter().any(|b| b.set.is_none() || (b.names.is_none() && b.tuple.is_none())) {
@@ -598,6 +695,7 @@ impl Comp {
                     }
                     let cache = if stable && !trivial {
                         let s = self.slot();
+                        self.cache_slots.push(s);
                         clear.push(PreOp::Clear(s));
                         Some(s)
                     } else {
@@ -666,6 +764,7 @@ impl Comp {
                 LetDef::Inst(_) => return None,
             };
             let cache = self.slot();
+            self.cache_slots.push(cache);
             clear.push(PreOp::Clear(cache));
             inner = push(&inner, ScK::Let { d, defs, below: sc.clone(), head: i + 1 == n, cache, ce: RefCell::new(None), root: false });
         }
@@ -706,9 +805,14 @@ impl Comp {
     fn expr(&mut self, n: N, sc: &Rc<Sc>) -> CE {
         self.shape = None;
         self.shape_ok = false;
+        self.dshape = None;
+        self.dshape_ok = false;
         let ce = self.expr0(n, sc);
         if !std::mem::replace(&mut self.shape_ok, false) {
             self.shape = None;
+        }
+        if !std::mem::replace(&mut self.dshape_ok, false) {
+            self.dshape = None;
         }
         ce
     }
@@ -718,6 +822,19 @@ impl Comp {
         if let Some(sh) = &mut self.shape {
             sh.clear.extend_from_slice(clear);
             self.shape_ok = true;
+        }
+        if let Some(d) = self.dshape.take() {
+            let pre = clear.to_vec();
+            let prog = d.prog.clone();
+            self.dshape = Some(DShape {
+                var: d.var,
+                direct: d.direct && pre.is_empty(),
+                prog: Rc::new(move |cx, ops| {
+                    run_pre(&pre, cx);
+                    prog(cx, ops)
+                }),
+            });
+            self.dshape_ok = true;
         }
     }
     fn expr0(&mut self, n: N, sc: &Rc<Sc>) -> CE {
@@ -802,10 +919,15 @@ impl Comp {
                                 return self.fallback(n, sc);
                             }
                             let idx = idx as usize;
+                            self.dshape = Some(DShape { var: idx, direct: true, prog: Rc::new(|_, _| Ok(true)) });
+                            self.dshape_ok = true;
                             return Box::new(move |cx| {
                                 let v = cx.cur.get(idx);
                                 if matches!(v, Value::Undef) {
                                     return bail();
+                                }
+                                if cx.rec_on.get() {
+                                    cx.rec.borrow_mut().reads.push((Loc::Whole(idx as u32), v.clone()));
                                 }
                                 Ok(v)
                             });
@@ -1029,8 +1151,74 @@ impl Comp {
             }
             E::Except { base, updates } => {
                 let base = self.expr(base, sc);
+                let dbase = self.dshape.take();
                 let at = self.slot();
                 let inner = push(sc, ScK::At { slot: at });
+                if let (Some(d), true, true) = (&dbase, updates.len() == 1, self.cache) {
+                    if d.direct {
+                        // [var EXCEPT !path = v]: for the step cache, a change of the variable at that path
+                        let (path, val) = &updates[0];
+                        let pces: Rc<Vec<CE>> = Rc::new(path.iter().map(|x| self.expr(x, sc)).collect());
+                        let vce: Rc<CE> = Rc::new(self.expr(val, &inner));
+                        let needs_old = path.len() > 1 || uses_at(val);
+                        let var = d.var;
+                        let (p2, v2) = (pces.clone(), vce.clone());
+                        self.dshape = Some(DShape {
+                            var,
+                            direct: false,
+                            prog: Rc::new(move |cx, ops| {
+                                let mut keys = Vec::with_capacity(p2.len());
+                                for x in p2.iter() {
+                                    keys.push(x(cx)?);
+                                }
+                                let cur = cx.cur.get(var);
+                                let mut newv = None;
+                                cx.ev.except_with(
+                                    cur.clone(),
+                                    &keys,
+                                    0,
+                                    &mut |old| {
+                                        cx.f.set(at, old);
+                                        let v = v2(cx)?;
+                                        newv = Some(v.clone());
+                                        Ok(v)
+                                    },
+                                    n,
+                                )?;
+                                let v = match newv {
+                                    Some(v) => v,
+                                    None => return Ok(false),
+                                };
+                                if needs_old {
+                                    match sc_::elem_at(&cur, &keys[0]) {
+                                        Some(old) => cx.rec.borrow_mut().reads.push((Loc::Elem(var as u32, keys[0].clone()), old)),
+                                        None => return Ok(false),
+                                    }
+                                }
+                                ops.push(DOp::Exc { path: keys, v });
+                                Ok(true)
+                            }),
+                        });
+                        self.dshape_ok = true;
+                        return Box::new(move |cx| {
+                            let f = base(cx)?;
+                            let mut keys = Vec::with_capacity(pces.len());
+                            for x in pces.iter() {
+                                keys.push(x(cx)?);
+                            }
+                            cx.ev.except_with(
+                                f,
+                                &keys,
+                                0,
+                                &mut |old| {
+                                    cx.f.set(at, old);
+                                    vce(cx)
+                                },
+                                n,
+                            )
+                        });
+                    }
+                }
                 let ups: Vec<(Vec<CE>, CE)> = updates.iter().map(|(path, val)| (path.iter().map(|x| self.expr(x, sc)).collect(), self.expr(val, &inner))).collect();
                 Box::new(move |cx| {
                     let mut f = base(cx)?;
@@ -1068,8 +1256,32 @@ impl Comp {
                 if !self.operand_ok(f, sc) {
                     return self.fallback(n, sc);
                 }
+                let fvar = var_of(f);
                 let fce = self.expr(f, sc);
                 let args: Vec<CE> = args.iter().map(|a| self.expr(a, sc)).collect();
+                if let (Some(idx), true) = (fvar, self.cache) {
+                    // var[k]: for the step cache this reads one element of the variable
+                    return Box::new(move |cx| {
+                        let fv = cx.cur.get(idx);
+                        let arg = if args.len() == 1 {
+                            args[0](cx)?
+                        } else {
+                            let mut t = Vec::with_capacity(args.len());
+                            for a in &args {
+                                t.push(a(cx)?);
+                            }
+                            Value::Tuple(TupleV::rc(t))
+                        };
+                        let v = cx.ev.apply_fcn(&fv, &arg, Some(n))?;
+                        if cx.rec_on.get() {
+                            cx.rec.borrow_mut().reads.push((Loc::Elem(idx as u32, arg), v.clone()));
+                        }
+                        if let Value::LazyFcn(lf) = &v {
+                            return lf.force(cx.ev);
+                        }
+                        Ok(v)
+                    });
+                }
                 Box::new(move |cx| {
                     let fv = fce(cx)?;
                     let arg = if args.len() == 1 {
@@ -1156,9 +1368,28 @@ impl Comp {
         let opname = name_str(d.name);
         let mut ces: Vec<CE> = Vec::with_capacity(args.len());
         let mut last_shape = None;
-        for a in args {
+        let mut first_d = None;
+        for (i, a) in args.iter().enumerate() {
             ces.push(self.expr(a, sc));
             last_shape = self.shape.take();
+            if i == 0 {
+                first_d = self.dshape.take();
+            }
+        }
+        if bags && args.len() == 2 && opname.as_ref() == "BagIn" && self.cache {
+            if let Some(idx) = var_of(&args[1]) {
+                // BagIn(x, var): for the step cache this reads whether one value is in the bag
+                let x = ces.into_iter().next().unwrap();
+                return Box::new(move |cx| {
+                    let x = x(cx)?;
+                    let b = cx.cur.get(idx);
+                    let r = cx.ev.call_builtin(bi, &[x.clone(), b])?;
+                    if cx.rec_on.get() {
+                        cx.rec.borrow_mut().reads.push((Loc::Member(idx as u32, x), r.clone()));
+                    }
+                    Ok(r)
+                });
+            }
         }
         if bags && args.len() == 1 && opname.as_ref() == "SetToBag" {
             // SetToBag({e}): remembered for a consumer
@@ -1174,6 +1405,21 @@ impl Comp {
                 if sh.bag {
                     // B (+) SetToBag({e}) / B (-) SetToBag({e}): one element in or out of the bag
                     let plus = opname.as_ref() == "\\oplus";
+                    if let Some(d) = first_d {
+                        let sh2 = sh.clone();
+                        self.dshape = Some(DShape {
+                            var: d.var,
+                            direct: false,
+                            prog: Rc::new(move |cx, ops| {
+                                if !(d.prog)(cx, ops)? {
+                                    return Ok(false);
+                                }
+                                ops.push(DOp::Bag { e: sh2.eval(cx)?, plus });
+                                Ok(true)
+                            }),
+                        });
+                        self.dshape_ok = true;
+                    }
                     let mut it = ces.into_iter();
                     let (b, one) = (it.next().unwrap(), it.next().unwrap());
                     return Box::new(move |cx| {
@@ -1297,20 +1543,59 @@ impl Comp {
                 })
             }
             K::If => {
-                let (c, t, e) = (self.expr(&a[0], sc), self.expr(&a[1], sc), self.expr(&a[2], sc));
+                let c: Rc<CE> = Rc::new(self.expr(&a[0], sc));
+                let t = self.expr(&a[1], sc);
+                let dt = self.dshape.take();
+                let e = self.expr(&a[2], sc);
+                let de = self.dshape.take();
+                if let (Some(dt), Some(de)) = (dt, de) {
+                    if dt.var == de.var {
+                        let c2 = c.clone();
+                        self.dshape = Some(DShape { var: dt.var, direct: false, prog: Rc::new(move |cx, ops| if truth(c2(cx)?)? { (dt.prog)(cx, ops) } else { (de.prog)(cx, ops) }) });
+                        self.dshape_ok = true;
+                    }
+                }
                 Box::new(move |cx| if truth(c(cx)?)? { t(cx) } else { e(cx) })
             }
             K::In | K::NotIn => {
                 let want = k == K::In;
                 let (x, s) = (self.expr(&a[0], sc), self.expr(&a[1], sc));
+                if let (Some(idx), true) = (var_of(&a[1]), self.cache) {
+                    // x \in var: for the step cache this reads whether one value is in the variable
+                    return Box::new(move |cx| {
+                        let x = x(cx)?;
+                        let r = as_set(cx.cur.get(idx))?.contains(&x)?;
+                        if cx.rec_on.get() {
+                            cx.rec.borrow_mut().reads.push((Loc::Member(idx as u32, x), Value::Bool(r)));
+                        }
+                        Ok(Value::Bool(r == want))
+                    });
+                }
                 Box::new(move |cx| {
                     let x = x(cx)?;
                     Ok(Value::Bool(as_set(s(cx)?)?.contains(&x)? == want))
                 })
             }
             K::Cup => {
-                let (x, y) = (self.expr(&a[0], sc), self.expr(&a[1], sc));
+                let x = self.expr(&a[0], sc);
+                let dx = self.dshape.take();
+                let y = self.expr(&a[1], sc);
                 if let Some(sh) = self.shape.take().filter(|sh| !sh.bag) {
+                    if let Some(d) = dx {
+                        let sh2 = sh.clone();
+                        self.dshape = Some(DShape {
+                            var: d.var,
+                            direct: false,
+                            prog: Rc::new(move |cx, ops| {
+                                if !(d.prog)(cx, ops)? {
+                                    return Ok(false);
+                                }
+                                ops.push(DOp::Set { e: sh2.eval(cx)?, add: true });
+                                Ok(true)
+                            }),
+                        });
+                        self.dshape_ok = true;
+                    }
                     // S \cup {e}
                     return Box::new(move |cx| {
                         let xs = as_set(x(cx)?)?;
@@ -1329,9 +1614,25 @@ impl Comp {
                 })
             }
             K::Diff | K::Cap => {
-                let (x, y) = (self.expr(&a[0], sc), self.expr(&a[1], sc));
+                let x = self.expr(&a[0], sc);
+                let dx = self.dshape.take();
+                let y = self.expr(&a[1], sc);
                 let diff = k == K::Diff;
                 let one = self.shape.take().filter(|sh| !sh.bag && diff);
+                if let (Some(d), Some(sh2)) = (dx, one.clone()) {
+                    self.dshape = Some(DShape {
+                        var: d.var,
+                        direct: false,
+                        prog: Rc::new(move |cx, ops| {
+                            if !(d.prog)(cx, ops)? {
+                                return Ok(false);
+                            }
+                            ops.push(DOp::Set { e: sh2.eval(cx)?, add: false });
+                            Ok(true)
+                        }),
+                    });
+                    self.dshape_ok = true;
+                }
                 Box::new(move |cx| {
                     if let Some(sh) = &one {
                         // S \ {e}
@@ -1449,7 +1750,42 @@ impl Comp {
         Box::new(move |cx, k| if truth(ce(cx)?)? { k() } else { Ok(()) })
     }
 
+    /// With the step cache on: above the units the action is only disjunctions, existential quantifiers,
+    /// LETs and inlined definitions; whatever else is met there is a unit.
     fn act_inner(&mut self, n: N, sc: &Rc<Sc>) -> AE {
+        let top = std::mem::replace(&mut self.top, false);
+        if !top || !self.cache {
+            return self.act_inner0(n, sc);
+        }
+        let structural = match &n.e {
+            E::Op(K::Or, _) | E::Let { .. } | E::Quant { forall: false, .. } => true,
+            E::App { sel: None, r, .. } => matches!(r.get(), Res::Def(d) if d.over.get().unwrap_or(d).builtin.get().is_none()),
+            _ => false,
+        };
+        if structural {
+            self.descend = true;
+            let r = self.act_inner0(n, sc);
+            self.descend = false;
+            return r;
+        }
+        self.unit(n, sc)
+    }
+    fn unit(&mut self, n: N, sc: &Rc<Sc>) -> AE {
+        let inner = self.act_inner0(n, sc);
+        // what the unit depends on besides the state: the variables bound by the quantifiers above it
+        // (whether or not its own scope names them: an inlined definition sees them through its arguments)
+        let bound = self.top_slots.clone();
+        // values kept for by-name bindings may have been computed before the unit: they are computed
+        // again inside it when it is recorded, so that what they read is noted
+        let clear = self.cache_slots.clone();
+        let id = (self.plan_id << 16) | self.units;
+        self.units += 1;
+        let stat = Rc::new(UnitStat { loc: n.loc, lookups: Cell::new(0), hits: Cell::new(0), off: Cell::new(false) });
+        self.unit_stats.push(stat.clone());
+        Box::new(move |cx, k| unit_run(cx, k, id, &bound, &clear, &inner, &stat, n))
+    }
+    fn act_inner0(&mut self, n: N, sc: &Rc<Sc>) -> AE {
+        let desc = std::mem::replace(&mut self.descend, false);
         self.budget -= 1;
         if self.budget < 0 {
             return fb_act(n, sc);
@@ -1471,7 +1807,13 @@ impl Comp {
                     Box::new(move |cx, k| conj(&items, 0, cx, k))
                 }
                 K::Or => {
-                    let items: Vec<AE> = a.iter().map(|x| self.act_inner(x, sc)).collect();
+                    let items: Vec<AE> = a
+                        .iter()
+                        .map(|x| {
+                            self.top = desc;
+                            self.act_inner(x, sc)
+                        })
+                        .collect();
                     Box::new(move |cx, k| {
                         for it in &items {
                             it(cx, k)?;
@@ -1493,6 +1835,7 @@ impl Comp {
                     match tgt {
                         Some(idx) => {
                             let rhs = self.expr(&a[1], sc);
+                            let dprog = self.dshape.take().filter(|d| d.var == idx && self.cache && *k == K::Eq).map(|d| d.prog);
                             let assigned = fb_act(n, sc);
                             let is_eq = *k == K::Eq;
                             Box::new(move |cx, k| {
@@ -1501,6 +1844,22 @@ impl Comp {
                                     return assigned(cx, k);
                                 }
                                 let ev = cx.ev;
+                                if let (Some(prog), true) = (&dprog, cx.rec_on.get()) {
+                                    // recording for the step cache: the new value as changes to the old one
+                                    let mut ops = vec![];
+                                    if prog(cx, &mut ops)? {
+                                        if let Some(v) = apply_ops(cx, &cx.cur.get(idx), &ops, n) {
+                                            cx.nxt.set(idx, v);
+                                            cx.rec.borrow_mut().delta[idx] = Some(ops);
+                                            ev.n_assigned.set(ev.n_assigned.get() + 1);
+                                            let r = k();
+                                            cx.nxt.clear(idx);
+                                            cx.rec.borrow_mut().delta[idx] = None;
+                                            ev.n_assigned.set(ev.n_assigned.get() - 1);
+                                            return r;
+                                        }
+                                    }
+                                }
                                 if is_eq {
                                     let v = rhs(cx)?;
                                     cx.nxt.set(idx, v);
@@ -1554,12 +1913,28 @@ impl Comp {
                         if distinct && cx.nxt.can_fill(cx.cur, &idxs) {
                             cx.nxt.fill(cx.cur, &idxs);
                             ev.n_assigned.set(ev.n_assigned.get() + idxs.len() as i64);
+                            if cx.rec_on.get() {
+                                let mut rec = cx.rec.borrow_mut();
+                                for &i in &idxs {
+                                    rec.delta[i as usize] = Some(vec![]);
+                                }
+                            }
                             let r = k();
+                            if cx.rec_on.get() {
+                                let mut rec = cx.rec.borrow_mut();
+                                for &i in &idxs {
+                                    rec.delta[i as usize] = None;
+                                }
+                            }
                             for &i in idxs.iter().rev() {
                                 cx.nxt.clear(i as usize);
                             }
                             ev.n_assigned.set(ev.n_assigned.get() - idxs.len() as i64);
                             return r;
+                        }
+                        if cx.rec_on.get() {
+                            // (a comparison with the next state: not something an entry describes)
+                            cx.rec.borrow_mut().bad = true;
                         }
                         let mut set: u32 = 0;
                         let mut r: R<()> = Ok(());
@@ -1615,7 +1990,15 @@ impl Comp {
                             Some(x) => x,
                             None => return fb_act(n, sc),
                         };
+                        self.top = desc;
+                        let mark = self.top_slots.len();
+                        if desc {
+                            for fb in &b.flat {
+                                self.top_slots.extend_from_slice(&fb.slots);
+                            }
+                        }
                         let body = self.act_inner(body, &inner);
+                        self.top_slots.truncate(mark);
                         return Box::new(move |cx, k| {
                             b.each(cx, &mut || {
                                 body(cx, &mut *k)?;
@@ -1627,7 +2010,14 @@ impl Comp {
                 };
                 let set = self.expr(set, sc);
                 let slot = self.slot();
+                self.top = desc;
+                if desc {
+                    self.top_slots.push(slot);
+                }
                 let body = self.act_inner(body, &push(sc, ScK::Slot { name: nm, slot }));
+                if desc {
+                    self.top_slots.pop();
+                }
                 Box::new(move |cx, k| {
                     let s = as_set(set(cx)?)?;
                     if let SetK::Interval(lo, hi) = &s.k {
@@ -1662,6 +2052,7 @@ impl Comp {
             }
             E::Let { defs, body } => match self.let_scope(defs, sc) {
                 Some((inner, clear)) => {
+                    self.top = desc;
                     let body = self.act_inner(body, &inner);
                     Box::new(move |cx, k| {
                         run_pre(&clear, cx);
@@ -1692,6 +2083,7 @@ impl Comp {
                         match self.bind_args(&d.params, args, root, sc) {
                             Some((inner, clear)) => {
                                 self.stack.push(id);
+                                self.top = desc;
                                 let b = self.act_inner(body, &inner);
                                 self.stack.pop();
                                 Box::new(move |cx, k| {
@@ -1726,6 +2118,164 @@ impl Comp {
     }
 }
 
+const LEAF: u64 = 0x1EAF_1EAF_1EAF_1EAF;
+fn bound_eq(vals: &[Value], cx: &Cx, bound: &[usize]) -> bool {
+    vals.len() == bound.len() && vals.iter().zip(bound).all(|(v, &s)| sc_::same(v, &cx.f.get(s)))
+}
+/// A unit with the step cache on: the stored successors when an entry matches the state, else an
+/// evaluation that is recorded and stored.
+#[allow(clippy::too_many_arguments)]
+fn unit_run(cx: &Cx, k: &mut dyn FnMut() -> R<()>, id: u32, bound: &[usize], clear: &[usize], inner: &AE, stat: &UnitStat, n: N) -> R<()> {
+    let table = match cx.cache {
+        Some(t) if !stat.off.get() && !cx.rec_on.get() && cx.ev.n_assigned.get() == 0 => t,
+        _ => return inner(cx, k),
+    };
+    let nv = cx.nv as usize;
+    let mut h0 = sc_::mix(0x5EED, id as u64);
+    for &s in bound {
+        match value_word(&cx.f.get(s)) {
+            Ok(w) => h0 = sc_::mix(h0, w),
+            Err(_) => return inner(cx, k),
+        }
+    }
+    let lookups = stat.lookups.get() + 1;
+    stat.lookups.set(lookups);
+    // 1. an entry whose unit, bound values and reads all match this state
+    let hit: Option<Vec<Value>> = cx.cur.with(|cv| {
+        let t = table.borrow();
+        let tm = match t.get(h0) {
+            Some(Entry::Tmpl(tm)) if tm.unit == id && bound_eq(&tm.bound, cx, bound) => tm,
+            _ => return None,
+        };
+        let mut h1 = h0;
+        for loc in &tm.locs {
+            h1 = sc_::mix(h1, sc_::word_at(cv, loc)?);
+        }
+        let leaf = match t.get(sc_::mix(h1, LEAF)) {
+            Some(Entry::Leaf(l)) if l.unit == id && bound_eq(&l.bound, cx, bound) => l,
+            _ => return None,
+        };
+        if !leaf.reads.iter().all(|(loc, v)| sc_::holds(cv, loc, v)) {
+            return None;
+        }
+        // every successor is built before any is handed on: if a change cannot be applied, this is a miss
+        let mut rows = Vec::with_capacity(leaf.succs.len() * nv);
+        for s in &leaf.succs {
+            for (i, w) in s.iter().enumerate() {
+                rows.push(match w {
+                    Write::Val(v) => v.clone(),
+                    Write::Delta(ops) if ops.is_empty() => cv[i].clone(),
+                    Write::Delta(ops) => apply_ops(cx, &cv[i], ops, n)?,
+                });
+            }
+        }
+        Some(rows)
+    });
+    let ev = cx.ev;
+    if let Some(rows) = hit {
+        stat.hits.set(stat.hits.get() + 1);
+        {
+            let mut t = table.borrow_mut();
+            t.n.lookups += 1;
+            t.n.hits += 1;
+        }
+        let mut rows = rows.into_iter();
+        while rows.len() > 0 {
+            for i in 0..nv {
+                cx.nxt.set(i, rows.next().unwrap());
+            }
+            ev.n_assigned.set(nv as i64);
+            let r = k();
+            for i in 0..nv {
+                cx.nxt.clear(i);
+            }
+            ev.n_assigned.set(0);
+            r?;
+        }
+        return Ok(());
+    }
+    // 2. evaluate, noting what is read and how each variable gets its value
+    for &s in clear {
+        cx.f.clear(s);
+    }
+    {
+        let mut rec = cx.rec.borrow_mut();
+        rec.reads.clear();
+        rec.bad = false;
+        rec.succs.clear();
+        rec.delta.clear();
+        rec.delta.resize(nv, None);
+    }
+    let f0 = cx.fallbacks.get();
+    cx.rec_on.set(true);
+    let r = inner(cx, &mut || {
+        cx.nxt.with(|nx| {
+            let mut rec = cx.rec.borrow_mut();
+            let mut ws = Vec::with_capacity(nv);
+            for i in 0..nv {
+                match rec.delta[i].clone() {
+                    Some(ops) => ws.push(Write::Delta(ops)),
+                    None => {
+                        if i >= nx.len() || matches!(nx[i], Value::Undef) {
+                            rec.bad = true;
+                        } else {
+                            ws.push(Write::Val(nx[i].clone()));
+                        }
+                    }
+                }
+            }
+            rec.succs.push(ws);
+        });
+        k()
+    });
+    cx.rec_on.set(false);
+    let mut t = table.borrow_mut();
+    t.n.lookups += 1;
+    let mut rec = cx.rec.borrow_mut();
+    let mut stored = false;
+    if r.is_ok() && !rec.bad && cx.fallbacks.get() == f0 {
+        stored = cx.cur.with(|cv| {
+            let bvals: Vec<Value> = bound.iter().map(|&s| cx.f.get(s)).collect();
+            // the locations whose values pick the entry: those of earlier evaluations of this unit with
+            // these bound values, and any new ones
+            let mut locs: Vec<Loc> = match t.get(h0) {
+                Some(Entry::Tmpl(tm)) if tm.unit == id && bound_eq(&tm.bound, cx, bound) => tm.locs.clone(),
+                _ => vec![],
+            };
+            let had = locs.len();
+            let fresh = !matches!(t.get(h0), Some(Entry::Tmpl(tm)) if tm.unit == id && bound_eq(&tm.bound, cx, bound));
+            for (loc, _) in &rec.reads {
+                if !locs.iter().any(|l| sc_::same_loc(l, loc)) {
+                    locs.push(loc.clone());
+                }
+            }
+            if locs.len() > 24 {
+                return false;
+            }
+            let mut h1 = h0;
+            for loc in &locs {
+                match sc_::word_at(cv, loc) {
+                    Some(w) => h1 = sc_::mix(h1, w),
+                    None => return false,
+                }
+            }
+            if fresh || locs.len() != had {
+                t.put(h0, Entry::Tmpl(Tmpl { unit: id, bound: bvals.clone(), locs }));
+            }
+            let leaf = Leaf { unit: id, bound: bvals, reads: std::mem::take(&mut rec.reads), succs: std::mem::take(&mut rec.succs) };
+            t.put(sc_::mix(h1, LEAF), Entry::Leaf(leaf));
+            true
+        });
+    }
+    if !stored {
+        t.n.uncacheable += 1;
+    }
+    // a unit that almost never hits is evaluated without the cache from then on
+    if lookups == 4096 && stat.hits.get() * 8 < lookups {
+        stat.off.set(true);
+    }
+    r
+}
 fn with_clear(clear: Vec<PreOp>, body: CE) -> CE {
     if clear.is_empty() {
         return body;
@@ -1759,6 +2309,7 @@ fn root_scope(ctx: &C, c: &mut Comp, seen: &mut HashSet<usize>) -> Option<(Rc<Sc
                     return None;
                 }
                 let cache = c.slot();
+                c.cache_slots.push(cache);
                 clear.push(PreOp::Clear(cache));
                 ScK::Let { d, defs: &[], below: sc.clone(), head: node.let_head, cache, ce: RefCell::new(None), root: true }
             }
@@ -1816,18 +2367,36 @@ pub struct Plans {
     pub invariants: Vec<Option<PredPlan>>,
     pub n: Counters,
     blank: StateRef,
+    /// the step cache, when it is on
+    cache: Option<RefCell<Table>>,
+    rec_on: Cell<bool>,
+    rec: RefCell<Rec>,
+    units: Vec<Rc<UnitStat>>,
+}
+
+/// EVERYSTATE_STEP_CACHE=on (an experiment; it implies the compiled evaluator)
+pub fn cache_enabled() -> bool {
+    matches!(std::env::var("EVERYSTATE_STEP_CACHE").as_deref(), Ok("on"))
+}
+fn cache_budget() -> usize {
+    let mb: f64 = std::env::var("EVERYSTATE_STEP_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(32.0);
+    (mb.max(0.001) * 1024.0 * 1024.0) as usize
 }
 
 /// EVERYSTATE_EVAL=compiled
 pub fn enabled() -> bool {
-    matches!(std::env::var("EVERYSTATE_EVAL").as_deref(), Ok("compiled"))
+    matches!(std::env::var("EVERYSTATE_EVAL").as_deref(), Ok("compiled")) || cache_enabled()
 }
 
 pub fn compile(model: &crate::model::Model) -> Plans {
+    let mut cache_on = cache_enabled();
+    let mut plan_id: u32 = 0;
+    let mut units = vec![];
     let mut actions = vec![];
     for a in &model.actions {
         let mut seen = HashSet::new();
-        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false, shape: None, shape_ok: false };
+        let mut c = Comp::new(cache_on, plan_id);
+        plan_id += 1;
         let root = if impure(a.e, &mut seen) { None } else { root_scope(&a.ctx, &mut c, &mut seen) };
         let (root, clear) = match root {
             Some(x) => x,
@@ -1839,7 +2408,9 @@ pub fn compile(model: &crate::model::Model) -> Plans {
                 continue;
             }
         };
+        c.top = true;
         let body = c.act(a.e, &root);
+        units.append(&mut c.unit_stats);
         let run: AE = if clear.is_empty() {
             body
         } else {
@@ -1850,10 +2421,13 @@ pub fn compile(model: &crate::model::Model) -> Plans {
         };
         actions.push(Some(ActPlan { run, frame: StateData::blank(c.nslots.max(1)), use_: Usage::default() }));
     }
+    let with_cache = cache_on;
+    cache_on = false; // (invariants are not cached)
     let mut invariants = vec![];
     for p in &model.invariants {
         let mut seen = HashSet::new();
-        let mut c = Comp { nslots: 0, stack: vec![], budget: 20_000, unstable: false, shape: None, shape_ok: false };
+        let mut c = Comp::new(cache_on, plan_id);
+        plan_id += 1;
         let root = if impure(p.e, &mut seen) || level_of(p.e) > 1 { None } else { root_scope(&p.ctx, &mut c, &mut seen) };
         let (root, clear) = match root {
             Some(x) => x,
@@ -1865,7 +2439,16 @@ pub fn compile(model: &crate::model::Model) -> Plans {
         let run = with_clear(clear, c.expr(p.e, &root));
         invariants.push(Some(PredPlan { run, frame: StateData::blank(c.nslots.max(1)), use_: Usage::default() }));
     }
-    Plans { actions, invariants, n: Counters::default(), blank: StateData::blank(model.vars.len()) }
+    Plans {
+        actions,
+        invariants,
+        n: Counters::default(),
+        blank: StateData::blank(model.vars.len()),
+        cache: if with_cache { Some(RefCell::new(Table::new(cache_budget()))) } else { None },
+        rec_on: Cell::new(false),
+        rec: RefCell::new(Rec::default()),
+        units,
+    }
 }
 
 impl Plans {
@@ -1880,9 +2463,10 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks };
+        let cx = Cx { ev, f: &p.frame, cur, nxt, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: self.cache.as_ref(), rec_on: &self.rec_on, rec: &self.rec };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx, k);
+        self.rec_on.set(false);
         p.use_.note(self.n.fallbacks.get() - f0);
         if r.is_err() {
             self.n.redone.set(self.n.redone.get() + 1);
@@ -1900,7 +2484,7 @@ impl Plans {
                 return None;
             }
         };
-        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks };
+        let cx = Cx { ev, f: &p.frame, cur: s, nxt: &self.blank, nv: nv as i64, fallbacks: &self.n.fallbacks, cache: None, rec_on: &self.rec_on, rec: &self.rec };
         let f0 = self.n.fallbacks.get();
         let r = (p.run)(&cx);
         p.use_.note(self.n.fallbacks.get() - f0);
@@ -1917,7 +2501,32 @@ impl Plans {
     }
     pub fn report(&self) -> String {
         let c = &self.n;
-        format!(
+        let mut cache = String::new();
+        if let Some(t) = &self.cache {
+            let t = t.borrow();
+            let off = self.units.iter().filter(|u| u.off.get()).count();
+            cache = format!(
+                "step cache: budget {:.1} MB, in use {:.1} MB (peak {:.1} MB); {} units, {} switched off for a low hit rate; {} lookups, {} hits ({:.2}%), {} stored, {} replaced, {} not stored for size, {} evaluations not cacheable\n",
+                t.budget as f64 / 1048576.0,
+                t.used as f64 / 1048576.0,
+                t.peak as f64 / 1048576.0,
+                self.units.len(),
+                off,
+                t.n.lookups,
+                t.n.hits,
+                100.0 * t.n.hits as f64 / t.n.lookups.max(1) as f64,
+                t.n.stored,
+                t.n.replaced,
+                t.n.too_big,
+                t.n.uncacheable
+            );
+            if std::env::var_os("EVERYSTATE_EVAL_DEBUG").is_some() {
+                for u in &self.units {
+                    cache += &format!("  unit at line {} col {}: {} lookups, {} hits{}\n", u.loc[0], u.loc[1], u.lookups.get(), u.hits.get(), if u.off.get() { " (switched off)" } else { "" });
+                }
+            }
+        }
+        cache + &format!(
             "compiled evaluator: {} of {} actions and {} of {} invariants compiled; evaluations: {} compiled, {} by the tree-walker (not compiled), {} redone by the tree-walker after a failed attempt; {} fallback expressions evaluated inside compiled code\n",
             self.actions.iter().filter(|a| a.is_some()).count(),
             self.actions.len(),

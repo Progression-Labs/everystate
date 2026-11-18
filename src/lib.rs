@@ -22,6 +22,7 @@ pub mod pcal;
 pub mod pprint;
 pub mod simulate;
 pub mod stdlib;
+pub mod stepcache;
 pub mod stepstats;
 pub mod tshash;
 pub mod value;
