@@ -71,10 +71,13 @@ enum ArgBd {
 }
 
 /// The tree-walker's context for a scope, from the current frame.
-fn build(sc: &Rc<Sc>, cx: &Cx) -> R<C> {
+/// `share`: values the compiled code has already computed for parameters and LET definitions are passed
+/// instead of thunks. Only for an expression that cannot prime, assign or test ENABLED: there a parameter
+/// is used for the expression it stands for (`q' = ...` with `q` bound to a variable), not for its value.
+fn build(sc: &Rc<Sc>, cx: &Cx, share: bool) -> R<C> {
     let below = |cx: &Cx| -> R<C> {
         match &sc.next {
-            Some(n) => build(n, cx),
+            Some(n) => build(n, cx, share),
             None => Ok(None),
         }
     };
@@ -86,21 +89,21 @@ fn build(sc: &Rc<Sc>, cx: &Cx) -> R<C> {
             // a value the compiled code already has is passed on instead of a thunk that would compute it again
             let known = match bd {
                 ArgBd::Const(v) => Some(v.clone()),
-                ArgBd::ByName { cache: Some(slot), .. } => Some(cx.f.get(*slot)).filter(|v| !matches!(v, Value::Undef)),
+                ArgBd::ByName { cache: Some(slot), .. } if share => Some(cx.f.get(*slot)).filter(|v| !matches!(v, Value::Undef)),
                 _ => None,
             };
             let v = match known {
                 Some(v) => v,
-                None => cx.ev.mk_arg(node, &build(asc, cx)?)?,
+                None => cx.ev.mk_arg(node, &build(asc, cx, share)?)?,
             };
             cons(*name, v, &below(cx)?)
         }
         ScK::Let { root: true, .. } | ScK::RootVal { .. } => below(cx)?,
         ScK::Let { defs, below: b, head, .. } => {
             debug_assert!(*head);
-            let ctx = cx.ev.bind_let(defs, &build(b, cx)?);
+            let ctx = cx.ev.bind_let(defs, &build(b, cx, share)?);
             // likewise for the LET definitions already evaluated: their cells start out filled
-            let mut s = Some(sc);
+            let mut s = if share { Some(sc) } else { None };
             while let Some(node) = s {
                 match &node.k {
                     ScK::Let { d, cache, root: false, below: b2, .. } if Rc::ptr_eq(b2, b) => {
@@ -134,13 +137,64 @@ fn debug_fb(seen: &Cell<bool>, what: &str, node: N) {
         eprintln!("fallback {} at line {} col {} to line {} col {}", what, node.loc[0], node.loc[1], node.loc[2], node.loc[3]);
     }
 }
+/// Nothing reachable from `n` primes, assigns, or asks what is enabled.
+fn primeless(n: N, seen: &mut HashSet<usize>) -> bool {
+    match &n.e {
+        E::Op(K::Prime | K::Enabled | K::Unchanged | K::Cdot | K::BoxAct | K::AngleAct | K::Always | K::Eventually | K::LeadsTo | K::Wf | K::Sf | K::Guarantee, _) => return false,
+        E::TQuant { .. } | E::StepRef | E::AssumeProve => return false,
+        E::App { r, sel, .. } => {
+            if sel.is_some() {
+                return false;
+            }
+            let d = match r.get() {
+                Res::Def(d) => Some(d),
+                Res::Decl(d) => d.subst.get(),
+                Res::Local => None,
+                Res::None => return false,
+            };
+            if let Some(d) = d {
+                let d = d.over.get().unwrap_or(d);
+                if seen.insert(d as *const Def as usize) {
+                    if let Some(inst) = &d.inst {
+                        let _ = inst;
+                        return false;
+                    }
+                    if d.builtin.get().is_none() {
+                        match d.body.get() {
+                            Some(b) => {
+                                if !primeless(b, seen) {
+                                    return false;
+                                }
+                            }
+                            None => return false,
+                        }
+                    }
+                }
+            }
+        }
+        E::Let { defs, .. } => {
+            if defs.iter().any(|d| matches!(d, LetDef::Inst(_))) {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    let mut ok = true;
+    for_children(n, &mut |c| {
+        if ok && !primeless(c, seen) {
+            ok = false;
+        }
+    });
+    ok
+}
 fn fb(node: N, sc: &Rc<Sc>) -> CE {
     let sc = sc.clone();
     let seen = Cell::new(false);
+    let share = primeless(node, &mut HashSet::new());
     Box::new(move |cx| {
         debug_fb(&seen, "expression", node);
         cx.fallbacks.set(cx.fallbacks.get() + 1);
-        let ctx = build(&sc, cx)?;
+        let ctx = build(&sc, cx, share)?;
         cx.ev.eval(node, &ctx)
     })
 }
@@ -150,7 +204,7 @@ fn fb_act(node: N, sc: &Rc<Sc>) -> AE {
     Box::new(move |cx, k| {
         debug_fb(&seen, "action", node);
         cx.fallbacks.set(cx.fallbacks.get() + 1);
-        let ctx = build(&sc, cx)?;
+        let ctx = build(&sc, cx, false)?;
         cx.ev.enumerate(node, &ctx, k)
     })
 }
@@ -1383,7 +1437,7 @@ impl Comp {
                     eprintln!("fallback all-assigned at line {} col {}", n.loc[0], n.loc[1]);
                 }
                 cx.fallbacks.set(cx.fallbacks.get() + 1);
-                let ctx = build(&sc, cx)?;
+                let ctx = build(&sc, cx, false)?;
                 return cx.ev.enumerate(n, &ctx, k);
             }
             inner(cx, k)

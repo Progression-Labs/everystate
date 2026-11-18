@@ -117,8 +117,12 @@ function plainSpec(r, name) {
     `Procs == 1..${P}`, 'VARIABLES pc, x, q, s, rec', 'vars == <<pc, x, q, s, rec>>',
     'Max(S) == CHOOSE v \\in S : \\A w \\in S : v >= w',
     'Init == /\\ pc = [p \\in Procs |-> "a"] /\\ x = 0 /\\ q = <<>> /\\ s = {} /\\ rec = [n |-> 0, f |-> [p \\in Procs |-> 0]]',
-    'Bump(v, d) == (v + d) % M'];
+    'Bump(v, d) == (v + d) % M',
+    // a parameter that stands for a variable: used for its value, then primed and left unchanged
+    'Shift(v, w) == v < M /\\ v\' = (v + 1) % M /\\ UNCHANGED w'];
   const stepA = r.pick([
+    '/\\ Shift(x, <<q, s>>) /\\ UNCHANGED rec',
+    '/\\ Shift(x, q) /\\ UNCHANGED <<s, rec>>',
     '/\\ x\' = Bump(x, p) /\\ UNCHANGED <<q, s, rec>>',
     '/\\ x\' \\in {x, Bump(x, 1)} /\\ UNCHANGED <<q, s, rec>>',
     '/\\ \\E d \\in 1..2 : x\' = Bump(x, d) /\\ UNCHANGED <<q, s>> /\\ rec\' = [rec EXCEPT !.f[p] = Bump(@, 1)]',
