@@ -461,6 +461,9 @@ pub struct Evaluator {
     pub host: RefCell<crate::host::HostRef>,
     /// while set, `eval` records the chain of expressions being evaluated (for TLC's message 2103)
     pub tracing: Cell<bool>,
+    /// `tracing`, or the read tracker of stepstats.rs is on: `eval` then takes its instrumented path. The
+    /// one flag ordinary evaluation tests.
+    pub hooked: Cell<bool>,
     pub trace_stack: RefCell<Vec<N>>,
     /// lazily built records for TLCGet("spec")
     pub spec_info: RefCell<Option<Box<dyn Fn() -> R<Value>>>>,
@@ -511,6 +514,7 @@ impl Evaluator {
             tlc_cache: RefCell::new(HashMap::new()),
             host: RefCell::new(Rc::new(crate::host::NullHost)),
             tracing: Cell::new(false),
+            hooked: Cell::new(false),
             trace_stack: RefCell::new(Vec::new()),
             spec_info: RefCell::new(None),
             rng: Cell::new(0x9E3779B97F4A7C15),
@@ -523,6 +527,14 @@ impl Evaluator {
         e
     }
 
+    pub fn set_tracing(&self, on: bool) {
+        self.tracing.set(on);
+        self.hooked.set(on || self.steps.on.get());
+    }
+    pub(crate) fn set_steps_on(&self, on: bool) {
+        self.steps.on.set(on);
+        self.hooked.set(on || self.tracing.get());
+    }
     pub fn fail<T>(&self, msg: String, n: N) -> R<T> {
         Err(Box::new(Fail::Tla(TlaError { msg, loc: Some(n.loc), module: n.module_str(), kind: "eval" })))
     }
@@ -1003,11 +1015,6 @@ impl Evaluator {
         let def = def.resolved();
         if let Some(bi) = def.builtin.get() {
             let na = args.len();
-            if self.steps.on.get() {
-                if let Some(v) = self.steps_builtin(def, args, ctx)? {
-                    return Ok(v);
-                }
-            }
             if bi.arith != 0 && na == 2 {
                 // integer arithmetic and comparison without the argument buffer and the indirect call
                 let x = self.eval(&args[0], ctx)?;
@@ -1385,10 +1392,18 @@ impl Evaluator {
 
     #[inline(never)]
     pub fn eval(&self, n: N, ctx: &C) -> R<Value> {
+        if self.hooked.get() {
+            return self.eval_hooked(n, ctx);
+        }
+        self.eval_inner(n, ctx)
+    }
+    #[cold]
+    #[inline(never)]
+    fn eval_hooked(&self, n: N, ctx: &C) -> R<Value> {
         if self.tracing.get() {
             return self.eval_traced(n, ctx);
         }
-        self.eval_inner(n, ctx)
+        self.eval_steps(n, ctx)
     }
     #[cold]
     #[inline(never)]
@@ -1401,7 +1416,7 @@ impl Evaluator {
         r
     }
     #[inline(always)]
-    fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
+    pub(crate) fn eval_inner(&self, n: N, ctx: &C) -> R<Value> {
         match &n.e {
             E::App { r, name, sel, .. } => {
                 // The most frequent leaves, without the general application path: a state variable or a
@@ -1418,9 +1433,6 @@ impl Evaluator {
                                             self.pr_touch.set(self.pr_touch.get() + 1);
                                         } else {
                                             self.st_touch.set(self.st_touch.get() + 1);
-                                        }
-                                        if self.steps.on.get() {
-                                            self.steps.var(idx as usize, &v, self.prime_depth.get() > 0);
                                         }
                                         return Ok(v);
                                     }
@@ -1693,17 +1705,9 @@ impl Evaluator {
                 Ok(f)
             }
             E::FnApp { f, args } => {
-                // (step-cache estimate: var[k] reads one element of the variable)
-                let pv = if self.steps.on.get() { plain_var(f, ctx) } else { None };
-                let fv = match pv {
-                    Some(_) => self.steps_quiet(f, ctx)?,
-                    None => self.eval_fn_operand(f, ctx)?,
-                };
+                let fv = self.eval_fn_operand(f, ctx)?;
                 let arg = self.eval_fn_arg(args, ctx)?;
                 let v = self.apply_fcn(&fv, &arg, Some(n))?;
-                if let Some(i) = pv {
-                    self.steps.elem(i as usize, value_word(&arg), value_word(&v));
-                }
                 if let Value::LazyFcn(lf) = &v {
                     return lf.force(self);
                 }
@@ -1978,9 +1982,6 @@ impl Evaluator {
                             } else {
                                 self.st_touch.set(self.st_touch.get() + 1);
                             }
-                            if self.steps.on.get() {
-                                self.steps.var(idx as usize, &v, self.prime_depth.get() > 0);
-                            }
                             return Ok(v);
                         }
                     }
@@ -1999,7 +2000,7 @@ impl Evaluator {
         }
     }
     #[inline]
-    fn eval_fn_arg(&self, args: &'static [Node], ctx: &C) -> R<Value> {
+    pub(crate) fn eval_fn_arg(&self, args: &'static [Node], ctx: &C) -> R<Value> {
         if args.len() == 1 {
             return self.eval(&args[0], ctx);
         }

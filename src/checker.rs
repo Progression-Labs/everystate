@@ -531,9 +531,9 @@ impl<'a> Checker<'a> {
     pub fn nested_expressions(&self, p: &Pred, s: &StateRef, t: Option<&StateRef>) -> String {
         let ev = self.ev;
         ev.trace_stack.borrow_mut().clear();
-        ev.tracing.set(true);
+        ev.set_tracing(true);
         let _ = self.eval_pred(p, s, t);
-        ev.tracing.set(false);
+        ev.set_tracing(false);
         let stack = std::mem::take(&mut *ev.trace_stack.borrow_mut());
         let mut lines: Vec<String> = vec![];
         let mut last: Option<N> = None;

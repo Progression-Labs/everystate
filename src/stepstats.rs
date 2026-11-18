@@ -222,15 +222,15 @@ impl Evaluator {
         st.h.set(h);
         st.nreads.set(0);
         st.uncacheable.set(false);
-        st.on.set(true);
+        self.set_steps_on(true);
         let r = self.enumerate(e, ctx, &mut || {
             // what follows the unit is not part of it
-            st.on.set(false);
+            self.set_steps_on(false);
             let r = k();
-            st.on.set(true);
+            self.set_steps_on(true);
             r
         });
-        st.on.set(false);
+        self.set_steps_on(false);
         r?;
         let mut units = st.units.borrow_mut();
         let u = units.entry((ai, e as *const Node as usize)).or_default();
@@ -253,10 +253,48 @@ impl Evaluator {
         if self.prime_depth.get() > 0 {
             self.steps.uncacheable.set(true);
         }
-        self.steps.on.set(false);
+        self.set_steps_on(false);
         let r = self.eval(n, ctx);
-        self.steps.on.set(true);
+        self.set_steps_on(true);
         r
+    }
+
+    /// `eval` while a unit is being measured: the reads that ordinary evaluation does not announce are
+    /// noted here, so that evaluation pays nothing for the tracker when it is off.
+    pub(crate) fn eval_steps(&self, n: N, ctx: &C) -> R<Value> {
+        match &n.e {
+            E::App { args, sel: None, r, .. } => {
+                if let Some(i) = plain_var(n, ctx) {
+                    // a whole variable
+                    let v = self.eval_inner(n, ctx)?;
+                    self.steps.var(i as usize, &v, self.prime_depth.get() > 0);
+                    return Ok(v);
+                }
+                if let Res::Def(d) = r.get() {
+                    let d = d.resolved();
+                    if d.builtin.get().is_some() {
+                        if let Some(v) = self.steps_builtin(d, args, ctx)? {
+                            return Ok(v);
+                        }
+                    }
+                }
+            }
+            E::FnApp { f, args } => {
+                // var[k] reads one element of the variable
+                if let Some(i) = plain_var(f, ctx) {
+                    let fv = self.steps_quiet(f, ctx)?;
+                    let arg = self.eval_fn_arg(args, ctx)?;
+                    let v = self.apply_fcn(&fv, &arg, Some(n))?;
+                    self.steps.elem(i as usize, value_word(&arg), value_word(&v));
+                    if let Value::LazyFcn(lf) = &v {
+                        return lf.force(self);
+                    }
+                    return Ok(v);
+                }
+            }
+            _ => {}
+        }
+        self.eval_inner(n, ctx)
     }
 
     /// While a unit is evaluated: the bag operators applied to a variable read elements of it, not all of
