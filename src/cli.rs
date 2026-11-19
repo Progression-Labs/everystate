@@ -638,6 +638,8 @@ pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 
         75
     } else if res.code == Some(2111) {
         76
+    } else if res.code == Some(2105) {
+        10 // an assumption whose evaluation fails (an Assert in it, say): TLC's exit status for it
     } else {
         exit_code(res.status)
     })

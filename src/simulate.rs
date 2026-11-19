@@ -765,6 +765,8 @@ pub(crate) fn run_cli(rep: &Reporter, model: &Model, opts: &SimOptions, deadlock
         76
     } else if res.code == Some(2404) {
         10 // a false POSTCONDITION: TLC's exit status for it
+    } else if res.code == Some(2105) {
+        10 // an assumption whose evaluation fails: TLC's exit status for it
     } else {
         exit_code(res.status)
     };
