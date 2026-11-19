@@ -208,6 +208,18 @@ fn str_hash_slow(id: StrId) -> u64 {
     }
     h
 }
+/// Forgets every string interned so far: the process-wide table, whether a typed model value
+/// exists, and this thread's caches in front of them. A check calls it before it starts, so a
+/// second check in the same process interns in its own first-seen order (TLC's), as a fresh
+/// process would, and does not explore in an order left by the one before.
+pub fn reset_strings() {
+    *GLOBAL_STRS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    ANY_TYPED.store(false, std::sync::atomic::Ordering::Relaxed);
+    STRS.with(|c| *c.borrow_mut() = StrCache::default());
+    STR_HASH_TABLE.with(|t| t.borrow_mut().clear());
+    STR_HASHES.with(|c| c.set((std::ptr::null(), 0)));
+    MV_TYPES.with(|c| c.borrow_mut().clear());
+}
 pub fn str_of(id: StrId) -> Rc<str> {
     STRS.with(|t| {
         let mut t = t.borrow_mut();
@@ -286,4 +298,25 @@ pub fn err<T>(kind: &'static str, msg: String) -> R<T> {
 }
 pub fn eval_err<T>(msg: String) -> R<T> {
     err("eval", msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A second check in one process interns from nothing, as a fresh process does: string ids
+    /// are first-seen order, which orders values and so the states a check finds. Left as it was,
+    /// zero's 59 specs run one after another in one process found Headset.laser.fails' violation
+    /// after 4 states generated where a fresh process (and TLC) found it after 10.
+    #[test]
+    fn a_reset_starts_the_string_order_again() {
+        let _ = str_id("intern-test-b");
+        let _ = str_id("intern-test-a");
+        model_value("t_typed");
+        reset_strings();
+        assert!(!any_typed());
+        assert_eq!(str_id("intern-test-a"), StrId(0));
+        assert_eq!(str_of(StrId(0)).as_ref(), "intern-test-a");
+        assert_eq!(str_id("intern-test-b"), StrId(1));
+    }
 }

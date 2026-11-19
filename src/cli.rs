@@ -387,6 +387,9 @@ pub fn file_resolver(host: HostRef, dirs: Vec<String>, parsed: Rc<RefCell<Vec<St
 }
 
 pub fn run_cli(argv: &[String], host: HostRef, library_paths: &[String]) -> i32 {
+    // Each run starts from no interned strings, as a fresh process does: ids are TLC's first-seen
+    // order, and a table left by an earlier run in this process changes the order states are found.
+    crate::intern::reset_strings();
     // `everystate conform ...`: trace conformance (a lone `conform` is still the spec conform.tla)
     if argv.len() > 1 && argv[0] == "conform" {
         return crate::conform::run_cli(&argv[1..], host, library_paths);
